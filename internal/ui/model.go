@@ -10,10 +10,10 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
-	claudepkg "github.com/lord/claudemux/internal/claude"
-	"github.com/lord/claudemux/internal/config"
-	"github.com/lord/claudemux/internal/session"
-	tmuxpkg "github.com/lord/claudemux/internal/tmux"
+	claudepkg "github.com/merlijnmacgillavry/claudemux/internal/claude"
+	"github.com/merlijnmacgillavry/claudemux/internal/config"
+	"github.com/merlijnmacgillavry/claudemux/internal/session"
+	tmuxpkg "github.com/merlijnmacgillavry/claudemux/internal/tmux"
 )
 
 var ansiEscape = regexp.MustCompile(`\x1b\[[0-9;:;]*[a-zA-Z]|\x1b[^[]`)

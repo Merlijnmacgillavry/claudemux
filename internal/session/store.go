@@ -3,7 +3,7 @@ package session
 import (
 	"time"
 
-	"github.com/lord/claudemux/internal/config"
+	"github.com/merlijnmacgillavry/claudemux/internal/config"
 )
 
 // Status represents the running state of a session.

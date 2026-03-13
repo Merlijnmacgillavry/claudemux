@@ -3,7 +3,7 @@ package session
 import (
 	"testing"
 
-	"github.com/lord/claudemux/internal/config"
+	"github.com/merlijnmacgillavry/claudemux/internal/config"
 )
 
 func TestStoreSetWindow(t *testing.T) {

@@ -32,15 +32,15 @@ checksum:
 
 release:
   github:
-    owner: lord
+    owner: merlijnmacgillavry
     name: claudemux
 
 brews:
   - name: claudemux
     repository:
-      owner: lord
+      owner: merlijnmacgillavry
       name: homebrew-tap
-    homepage: https://github.com/lord/claudemux
+    homepage: https://github.com/merlijnmacgillavry/claudemux
     description: A lazygit-style TUI for managing Claude Code sessions
     license: MIT
     install: |

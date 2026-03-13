@@ -1,4 +1,4 @@
-module github.com/lord/claudemux
+module github.com/merlijnmacgillavry/claudemux
 
 go 1.24.2
 

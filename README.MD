@@ -12,14 +12,19 @@ Navigate, rename, create, and switch between Claude Code conversations — all f
 - **Full PTY passthrough** — Claude runs natively, no output mangling
 - **Vim keybindings** — If you know lazygit, you know claudemux
 
+## Requirements
+
+- [tmux](https://github.com/tmux/tmux) — `brew install tmux` / `apt install tmux`
+- [claude CLI](https://claude.ai/code) — must be available in `$PATH`
+
 ## Quick Start
 
 ```bash
-# Requires Go 1.22+ and claude CLI installed
-go install github.com/lord/claudemux/cmd/claudemux@latest
+# Requires Go 1.22+
+go install github.com/merlijnmacgillavry/claudemux/cmd/claudemux@latest
 
 # Or build from source
-git clone https://github.com/lord/claudemux.git
+git clone https://github.com/merlijnmacgillavry/claudemux.git
 cd claudemux
 go build -o claudemux ./cmd/claudemux
 ./claudemux
@@ -34,7 +39,7 @@ go build -o claudemux ./cmd/claudemux
 | `n` | New session |
 | `r` | Rename session |
 | `d` | Delete session |
-| `tab` | Switch focus |
+| `alt+h/l` | Switch focus |
 | `Esc` | Back to sidebar |
 | `?` | Help |
 | `q` | Quit |
@@ -47,7 +52,7 @@ Config lives at `~/.config/claudemux/config.json` and is created automatically o
 
 - [Bubble Tea](https://github.com/charmbracelet/bubbletea) — TUI framework
 - [Lip Gloss](https://github.com/charmbracelet/lipgloss) — Styling
-- [creack/pty](https://github.com/creack/pty) — PTY management
+- [tmux](https://github.com/tmux/tmux) — Session and process management
 
 ## License
 
