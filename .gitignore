@@ -1,6 +1,6 @@
 # Binaries
 lazy-claude
-claudemux
+bin/claudemux
 *.exe
 *.dll
 *.so
