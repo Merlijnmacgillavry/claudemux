@@ -630,6 +630,7 @@ func (m *RootModel) handleInsertKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.unchangedTicks = 0
 			return m, tea.Batch(
 				sendKeyCmd(m.tmux, m.activeWindowName, "\x1b[13;2u", true),
+				pollCapture(m.tmux, m.activeWindowName, m.mainPane.viewport.Height),
 				startTick(m.tickGeneration, m.tickInterval()),
 			)
 		}
@@ -638,6 +639,7 @@ func (m *RootModel) handleInsertKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.unchangedTicks = 0 // reset so the next tick fires at 100ms
 			return m, tea.Batch(
 				sendKeyCmd(m.tmux, m.activeWindowName, evt.Key, evt.Literal),
+				pollCapture(m.tmux, m.activeWindowName, m.mainPane.viewport.Height),
 				startTick(m.tickGeneration, m.tickInterval()),
 			)
 		}
