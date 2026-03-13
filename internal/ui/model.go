@@ -5,9 +5,11 @@ import (
 	"hash/crc32"
 	"os"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
+	"github.com/atotto/clipboard"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	claudepkg "github.com/merlijnmacgillavry/claudemux/internal/claude"
@@ -227,7 +229,7 @@ func startBgPollTick() tea.Cmd {
 	})
 }
 
-func createWindow(client *tmuxpkg.Client, store *session.Store, claudeBinary, displayName, cwd string, skipPerms bool) tea.Cmd {
+func createWindow(client *tmuxpkg.Client, store *session.Store, claudeBinary, displayName, cwd string, skipPerms bool, scrollback int) tea.Cmd {
 	startedAt := time.Now()
 	command := claudeBinary
 	if skipPerms {
@@ -246,6 +248,9 @@ func createWindow(client *tmuxpkg.Client, store *session.Store, claudeBinary, di
 		}
 	created:
 		store.SetWindow(windowName, displayName, cwd)
+		if scrollback > 0 {
+			store.SetScrollback(windowName, scrollback)
+		}
 		cfg := store.GetConfig()
 		_ = cfg.Save()
 		return windowCreatedMsg{windowName: windowName, displayName: displayName, cwd: cwd, startedAt: startedAt}
@@ -400,6 +405,7 @@ func (m *RootModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if h != m.lastCaptureHash {
 			m.lastCaptureHash = h
 			m.unchangedTicks = 0
+			m.mainPane.ClearSelection() // stale coords after content change
 			m.mainPane.SetContent(msg.content)
 			return m, startTick(m.tickGeneration, m.tickInterval())
 		}
@@ -517,6 +523,15 @@ func (m *RootModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 func (m *RootModel) handleNormalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	m.statusBar.ClearError()
+
+	// While the sidebar list is accepting filter input, forward every key to it
+	// rather than treating letters like n/r/d as global shortcuts.
+	if m.sidebar.IsFiltering() {
+		var cmd tea.Cmd
+		m.sidebar, cmd = m.sidebar.Update(msg)
+		return m, cmd
+	}
+
 	switch msg.String() {
 	case "q":
 		return m, tea.Quit
@@ -559,6 +574,46 @@ func (m *RootModel) handleNormalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case "s":
+		sel := m.sidebar.SelectedSession()
+		if sel != nil {
+			meta, _ := m.store.GetWindow(sel.ID)
+			scrollback := meta.Scrollback
+			if scrollback == 0 {
+				scrollback = config.DefaultScrollbackLines
+			}
+			m.dialog.ShowSettings(sel.ID, sel.Name, scrollback)
+			m.mode = ModeDialog
+			m.statusBar.SetMode(m.mode)
+		}
+		return m, nil
+
+	case "[":
+		newW := m.sidebarWidth() - 2
+		if newW < 16 {
+			newW = 16
+		}
+		m.cfg.UIPrefs.SidebarWidth = newW
+		m.resize()
+		_ = m.cfg.Save()
+		return m, nil
+
+	case "]":
+		newW := m.sidebarWidth() + 2
+		if newW > 60 {
+			newW = 60
+		}
+		if m.width-newW < 20 {
+			newW = m.width - 20
+		}
+		if newW < 16 {
+			return m, nil
+		}
+		m.cfg.UIPrefs.SidebarWidth = newW
+		m.resize()
+		_ = m.cfg.Save()
+		return m, nil
+
 	default:
 		var cmd tea.Cmd
 		m.sidebar, cmd = m.sidebar.Update(msg)
@@ -568,6 +623,16 @@ func (m *RootModel) handleNormalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 func (m *RootModel) handleInsertKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if m.activeWindowName != "" {
+		// Shift+Enter → send kitty-protocol Shift+Enter sequence to Claude Code.
+		// Requires a terminal that emits \x1b[13;2u (kitty keyboard protocol).
+		if msg.String() == "shift+enter" {
+			m.tickGeneration++
+			m.unchangedTicks = 0
+			return m, tea.Batch(
+				sendKeyCmd(m.tmux, m.activeWindowName, "\x1b[13;2u", true),
+				startTick(m.tickGeneration, m.tickInterval()),
+			)
+		}
 		if evt := tmuxpkg.KeyMsgToTmux(msg); evt != nil {
 			m.tickGeneration++
 			m.unchangedTicks = 0 // reset so the next tick fires at 100ms
@@ -630,10 +695,11 @@ func (m *RootModel) confirmDialog() (tea.Model, tea.Cmd) {
 		cwd := m.dialog.PickerDir()
 		name := m.dialog.PendingName()
 		skipPerms := m.dialog.PendingSkipPermissions()
+		scrollback := m.dialog.PendingScrollback()
 		m.dialog.Close()
 		m.mode = ModeNormal
 		m.statusBar.SetMode(m.mode)
-		return m, createWindow(m.tmux, m.store, m.claudeBinary, name, cwd, skipPerms)
+		return m, createWindow(m.tmux, m.store, m.claudeBinary, name, cwd, skipPerms, scrollback)
 
 	case DialogRename:
 		id := m.dialog.SessionID()
@@ -675,6 +741,25 @@ func (m *RootModel) confirmDialog() (tea.Model, tea.Cmd) {
 		return m, discoverWindows(m.tmux, m.store)
 
 	case DialogHelp:
+		m.dialog.Close()
+		m.mode = ModeNormal
+		m.statusBar.SetMode(m.mode)
+		return m, nil
+
+	case DialogSettings:
+		id := m.dialog.SessionID()
+		if id != "" {
+			lines, err := strconv.Atoi(strings.TrimSpace(m.dialog.InputValue()))
+			if err != nil || lines < 100 {
+				lines = 100
+			}
+			if lines > 50000 {
+				lines = 50000
+			}
+			m.store.SetScrollback(id, lines)
+			cfg := m.store.GetConfig()
+			_ = cfg.Save()
+		}
 		m.dialog.Close()
 		m.mode = ModeNormal
 		m.statusBar.SetMode(m.mode)
@@ -746,6 +831,17 @@ func (m *RootModel) openWindow(windowName, displayName string, isRunning bool) t
 	// from the previous active window's chain.
 	m.tickGeneration++
 	paneH := m.paneHeight()
+
+	sw := m.sidebarWidth()
+	mw := m.width - sw
+	sh := 1
+	ph := m.height - sh
+	tw := mw - 3
+	th := ph - 3
+	if tw > 0 && th > 0 {
+		go m.tmux.ResizeWindow(windowName, tw, th)
+	}
+
 	return tea.Batch(
 		pollCapture(m.tmux, windowName, paneH),
 		startTick(m.tickGeneration, m.tickInterval()),
@@ -753,11 +849,14 @@ func (m *RootModel) openWindow(windowName, displayName string, isRunning bool) t
 }
 
 func (m *RootModel) paneHeight() int {
-	h := m.height - 1 - 2
-	if h < 1 {
-		return 24
+	if m.activeWindowName != "" {
+		if meta, ok := m.store.GetWindow(m.activeWindowName); ok {
+			if meta.Scrollback > 0 {
+				return meta.Scrollback
+			}
+		}
 	}
-	return h
+	return config.DefaultScrollbackLines
 }
 
 func (m *RootModel) resize() {
@@ -769,9 +868,34 @@ func (m *RootModel) resize() {
 	m.sidebar.SetSize(sidebarWidth-2, paneHeight-2)
 	m.mainPane.SetSize(mainWidth-2, paneHeight-2)
 	m.statusBar.SetWidth(m.width)
+
+	if m.activeWindowName != "" {
+		tw := mainWidth - 3  // border(2) + scrollbar(1)
+		th := paneHeight - 3 // border(2) + title(1)
+		if tw > 0 && th > 0 {
+			go m.tmux.ResizeWindow(m.activeWindowName, tw, th)
+		}
+	}
 }
 
 func (m *RootModel) sidebarWidth() int {
+	if m.cfg.UIPrefs.SidebarWidth > 0 {
+		w := m.cfg.UIPrefs.SidebarWidth
+		if w < 16 {
+			w = 16
+		}
+		if w > 60 {
+			w = 60
+		}
+		// Don't let sidebar consume the entire terminal.
+		if m.width-w < 20 {
+			w = m.width - 20
+		}
+		if w < 16 {
+			w = 16
+		}
+		return w
+	}
 	w := m.width / 4
 	if w < 20 {
 		w = 20
@@ -782,6 +906,29 @@ func (m *RootModel) sidebarWidth() int {
 	return w
 }
 
+// screenToContent maps a screen (X, Y) coordinate to a content (row, col)
+// coordinate within the main pane's viewport content buffer.
+//
+// Layout (0-indexed screen rows/cols):
+//   col 0..sidebarW-1        : sidebar (border inclusive)
+//   col sidebarW             : main pane left border
+//   col sidebarW+1..          : main pane content
+//   row 0                    : top border of both panes
+//   row 1                    : main pane title bar
+//   row 2..height-2           : viewport content rows
+func (m *RootModel) screenToContent(screenX, screenY int) (row, col int) {
+	sidebarW := m.sidebarWidth()
+	col = screenX - sidebarW - 1
+	row = (screenY - 2) + m.mainPane.viewport.YOffset
+	if col < 0 {
+		col = 0
+	}
+	if row < 0 {
+		row = 0
+	}
+	return row, col
+}
+
 func (m *RootModel) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	if m.mode == ModeDialog {
 		return m, nil
@@ -789,9 +936,10 @@ func (m *RootModel) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 
 	sidebarW := m.sidebarWidth()
 
+	// Left-button press: begin selection in main pane, or click in sidebar.
 	if msg.Action == tea.MouseActionPress && msg.Button == tea.MouseButtonLeft {
 		if msg.X < sidebarW {
-			// Click in sidebar — switch focus and open the clicked session.
+			m.mainPane.ClearSelection()
 			m.focus = SidebarFocused
 			m.mode = ModeNormal
 			m.statusBar.SetMode(m.mode)
@@ -803,8 +951,34 @@ func (m *RootModel) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 					return m, m.openWindow(sel.ID, sel.Name, sel.IsRunning)
 				}
 			}
+			return m, nil
 		} else if m.mainPane.hasSession {
-			// Click in main pane — enter INSERT mode.
+			row, col := m.screenToContent(msg.X, msg.Y)
+			m.mainPane.StartSelection(row, col)
+			return m, nil
+		}
+		return m, nil
+	}
+
+	// Mouse drag: update selection endpoint.
+	if msg.Action == tea.MouseActionMotion && m.mainPane.selection.Active {
+		row, col := m.screenToContent(msg.X, msg.Y)
+		m.mainPane.UpdateSelection(row, col)
+		return m, nil
+	}
+
+	// Left-button release: finalise selection or fall back to INSERT mode click.
+	if msg.Action == tea.MouseActionRelease && msg.Button == tea.MouseButtonLeft && m.mainPane.selection.Active {
+		sel := m.mainPane.selection
+		isClick := sel.StartRow == sel.EndRow && sel.StartCol == sel.EndCol
+		if !isClick {
+			if text := m.mainPane.SelectedText(); text != "" {
+				_ = clipboard.WriteAll(text)
+			}
+			m.mainPane.ClearSelection()
+		} else {
+			// Plain click with no drag → enter INSERT mode as before.
+			m.mainPane.ClearSelection()
 			m.focus = MainFocused
 			m.mode = ModeInsert
 			m.statusBar.SetMode(m.mode)
@@ -812,7 +986,7 @@ func (m *RootModel) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
-	// Forward scroll events to whichever pane the mouse is over.
+	// Forward scroll and other events to the appropriate pane.
 	var cmd tea.Cmd
 	if msg.X < sidebarW {
 		m.sidebar, cmd = m.sidebar.Update(msg)

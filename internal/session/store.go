@@ -72,6 +72,13 @@ func (s *Store) AllWindows() map[string]config.WindowMeta {
 	return s.cfg.Windows
 }
 
+// SetScrollback updates the scrollback line count for an existing window.
+func (s *Store) SetScrollback(windowName string, lines int) {
+	meta := s.cfg.Windows[windowName]
+	meta.Scrollback = lines
+	s.cfg.Windows[windowName] = meta
+}
+
 // GetConfig returns the underlying config (for saving).
 func (s *Store) GetConfig() config.Config {
 	return s.cfg

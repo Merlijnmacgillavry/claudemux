@@ -79,9 +79,9 @@ func (s StatusBarModel) View() string {
 	var hints string
 	switch s.mode {
 	case ModeNormal:
-		hints = "j/k: navigate  enter: open  n: new  r: rename  d: delete  /: search  tab: focus  ?: help  q: quit"
+		hints = "j/k: navigate  enter: open  n: new  r: rename  s: settings  d: delete  /: search  [/]: resize  ?: help  q: quit"
 	case ModeInsert:
-		hints = "esc: back to sidebar  (all other keys sent to Claude)"
+		hints = "shift+enter: newline  drag: copy  (all other keys sent to Claude)"
 	case ModeDialog:
 		hints = "enter: confirm  esc: cancel"
 	}

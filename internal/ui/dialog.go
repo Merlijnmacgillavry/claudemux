@@ -3,11 +3,13 @@ package ui
 import (
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/merlijnmacgillavry/claudemux/internal/config"
 )
 
 // DialogType identifies which dialog is showing.
@@ -20,15 +22,17 @@ const (
 	DialogRename
 	DialogDelete
 	DialogHelp
+	DialogSettings
 )
 
 // dirPickState is a lightweight searchable directory picker.
 type dirPickState struct {
-	cwd      string
-	all      []string // all visible subdirs in cwd
-	filtered []string // filtered by query
-	cursor   int
-	filter   textinput.Model
+	cwd        string
+	all        []string // all visible subdirs in cwd
+	filtered   []string // filtered by query
+	cursor     int
+	filter     textinput.Model
+	showHidden bool
 }
 
 func newDirPickState(startDir string) dirPickState {
@@ -51,7 +55,7 @@ func (d *dirPickState) loadEntries() {
 	}
 	var dirs []string
 	for _, e := range entries {
-		if e.IsDir() && !strings.HasPrefix(e.Name(), ".") {
+		if e.IsDir() && (d.showHidden || !strings.HasPrefix(e.Name(), ".")) {
 			dirs = append(dirs, e.Name())
 		}
 	}
@@ -105,6 +109,11 @@ func (d *dirPickState) ascend() {
 func (d dirPickState) Update(msg tea.Msg) (dirPickState, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
+		if msg.String() == "ctrl+h" {
+			d.showHidden = !d.showHidden
+			d.loadEntries()
+			return d, nil
+		}
 		switch msg.Type {
 		case tea.KeyUp:
 			if d.cursor > 0 {
@@ -187,15 +196,21 @@ type DialogModel struct {
 
 	// new session options
 	skipPermissions bool
+	scrollbackInput textinput.Model // second input: scrollback lines in new-session dialog
+	newSessionField int             // 0=name, 1=scrollback, 2=permissions
 }
 
 func NewDialogModel(styles Styles) DialogModel {
 	ti := textinput.New()
 	ti.CharLimit = 80
+	sb := textinput.New()
+	sb.CharLimit = 10
+	sb.Placeholder = "2000"
 	return DialogModel{
-		styles:     styles,
-		dialogType: DialogNone,
-		input:      ti,
+		styles:          styles,
+		dialogType:      DialogNone,
+		input:           ti,
+		scrollbackInput: sb,
 	}
 }
 
@@ -207,6 +222,9 @@ func (d *DialogModel) ShowNewSession() {
 	d.input.SetValue("")
 	d.input.Focus()
 	d.skipPermissions = false
+	d.scrollbackInput.SetValue("")
+	d.scrollbackInput.Blur()
+	d.newSessionField = 0
 }
 
 func (d *DialogModel) ShowDirPicker(name, startDir string) tea.Cmd {
@@ -241,6 +259,16 @@ func (d *DialogModel) ShowHelp() {
 	d.dialogType = DialogHelp
 	d.title = "Keybindings"
 	d.input.Blur()
+}
+
+func (d *DialogModel) ShowSettings(id, name string, scrollback int) {
+	d.dialogType = DialogSettings
+	d.title = "Session Settings"
+	d.sessionID = id
+	d.sessionName = name
+	d.input.Placeholder = "Scrollback lines (default 2000)"
+	d.input.SetValue(strconv.Itoa(scrollback))
+	d.input.Focus()
 }
 
 func (d *DialogModel) Close() {
@@ -279,6 +307,16 @@ func (d DialogModel) PickerDir() string {
 	return d.dp.cwd
 }
 
+// PendingScrollback returns the parsed scrollback line count from the new-session
+// scrollback input. Falls back to config.DefaultScrollbackLines if empty or invalid.
+func (d DialogModel) PendingScrollback() int {
+	val, err := strconv.Atoi(strings.TrimSpace(d.scrollbackInput.Value()))
+	if err != nil || val <= 0 {
+		return config.DefaultScrollbackLines
+	}
+	return val
+}
+
 func (d DialogModel) Update(msg tea.Msg) (DialogModel, tea.Cmd) {
 	var cmd tea.Cmd
 	switch d.dialogType {
@@ -286,9 +324,31 @@ func (d DialogModel) Update(msg tea.Msg) (DialogModel, tea.Cmd) {
 		d.dp, cmd = d.dp.Update(msg)
 	case DialogNewSession:
 		if k, ok := msg.(tea.KeyMsg); ok && k.Type == tea.KeyTab {
-			d.skipPermissions = !d.skipPermissions
+			d.newSessionField = (d.newSessionField + 1) % 3
+			switch d.newSessionField {
+			case 0:
+				d.input.Focus()
+				d.scrollbackInput.Blur()
+			case 1:
+				d.input.Blur()
+				d.scrollbackInput.Focus()
+			case 2:
+				d.input.Blur()
+				d.scrollbackInput.Blur()
+			}
 			return d, nil
 		}
+		switch d.newSessionField {
+		case 0:
+			d.input, cmd = d.input.Update(msg)
+		case 1:
+			d.scrollbackInput, cmd = d.scrollbackInput.Update(msg)
+		case 2:
+			if k, ok := msg.(tea.KeyMsg); ok && k.String() == " " {
+				d.skipPermissions = !d.skipPermissions
+			}
+		}
+	case DialogSettings:
 		d.input, cmd = d.input.Update(msg)
 	default:
 		d.input, cmd = d.input.Update(msg)
@@ -313,9 +373,12 @@ func (d DialogModel) View(screenWidth, screenHeight int) string {
 			"Enter a name for the new session:",
 			d.input.View(),
 			"",
+			"Scrollback lines:",
+			d.scrollbackInput.View(),
+			"",
 			checkbox,
 			"",
-			hint.Render("tab to toggle permissions  enter to continue  esc to cancel"),
+			hint.Render("tab to cycle fields  space to toggle permissions  enter to continue  esc to cancel"),
 		)
 
 	case DialogDirPicker:
@@ -332,7 +395,7 @@ func (d DialogModel) View(screenWidth, screenHeight int) string {
 			"",
 			d.dp.View(),
 			"",
-			hint.Render("type to filter  ↑↓ navigate  → descend  ⌫ go up  enter select  esc cancel"),
+			hint.Render("type to filter  ↑↓ navigate  → descend  ⌫ go up  ctrl+h hidden  enter select  esc cancel"),
 		)
 
 	case DialogRename:
@@ -353,6 +416,18 @@ func (d DialogModel) View(screenWidth, screenHeight int) string {
 			hint.Render("enter to confirm  esc to cancel"),
 		)
 
+	case DialogSettings:
+		body = lipgloss.JoinVertical(lipgloss.Left,
+			d.styles.DialogTitle.Render(d.title),
+			"",
+			"Session: "+d.sessionName,
+			"",
+			"Scrollback lines:",
+			d.input.View(),
+			"",
+			hint.Render("enter to confirm  esc to cancel"),
+		)
+
 	case DialogHelp:
 		accent := lipgloss.NewStyle().Foreground(lipgloss.Color("#E9D5FF")).Bold(true)
 		body = lipgloss.JoinVertical(lipgloss.Left,
@@ -363,8 +438,10 @@ func (d DialogModel) View(screenWidth, screenHeight int) string {
 			"  enter      open/resume session",
 			"  n          new session",
 			"  r          rename session",
+			"  s          session settings",
 			"  d          delete session",
 			"  /          search sessions",
+			"  [/]        resize sidebar",
 			"  ?          toggle this help",
 			"  q          quit",
 			"",

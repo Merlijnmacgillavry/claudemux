@@ -114,6 +114,18 @@ func (c *Client) RenameWindow(oldName, newName string) error {
 	return err
 }
 
+// ResizeWindow resizes the single pane in the named window to the given
+// character dimensions. Uses resize-window because each claudemux window
+// contains exactly one pane.
+func (c *Client) ResizeWindow(windowName string, width, height int) error {
+	_, err := c.run(
+		"resize-window", "-t", c.target(windowName),
+		"-x", strconv.Itoa(width),
+		"-y", strconv.Itoa(height),
+	)
+	return err
+}
+
 // IsPaneDead returns true if the pane's process has exited.
 // Uses display-message which is lighter than list-panes.
 func (c *Client) IsPaneDead(windowName string) (bool, error) {

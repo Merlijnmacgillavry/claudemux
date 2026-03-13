@@ -14,12 +14,16 @@ type UIPrefs struct {
 	SidebarWidth int `json:"sidebarWidth,omitempty"`
 }
 
+// DefaultScrollbackLines is the default number of lines captured from a tmux pane.
+const DefaultScrollbackLines = 2000
+
 // WindowMeta stores metadata for a tmux-managed Claude window.
 type WindowMeta struct {
 	DisplayName     string    `json:"displayName"`
 	WorkingDir      string    `json:"workingDir,omitempty"`
 	ClaudeSessionID string    `json:"claudeSessionID,omitempty"`
 	CreatedAt       time.Time `json:"createdAt"`
+	Scrollback      int       `json:"scrollback,omitempty"` // 0 means use DefaultScrollback
 }
 
 // Config is the top-level application configuration.

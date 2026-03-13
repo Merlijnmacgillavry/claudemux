@@ -111,7 +111,7 @@ func NewSidebarModel(styles Styles) SidebarModel {
 func (s *SidebarModel) SetSize(w, h int) {
 	s.width = w
 	s.height = h
-	s.list.SetSize(w, h)
+	s.list.SetSize(w, h-1) // reserve 1 row for pane-switch hint
 }
 
 func (s *SidebarModel) SetSessions(sessions []SessionItem) {
@@ -196,6 +196,11 @@ func (s SidebarModel) IsRenaming() bool {
 	return s.renaming
 }
 
+// IsFiltering reports whether the sidebar list is currently in filter-input mode.
+func (s SidebarModel) IsFiltering() bool {
+	return s.list.FilterState() == list.Filtering
+}
+
 func (s SidebarModel) Update(msg tea.Msg) (SidebarModel, tea.Cmd) {
 	var cmd tea.Cmd
 	if s.renaming {
@@ -207,10 +212,15 @@ func (s SidebarModel) Update(msg tea.Msg) (SidebarModel, tea.Cmd) {
 }
 
 func (s SidebarModel) View() string {
+	hint := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("#6B7280")).
+		Render("alt+l: open  alt+h: back")
+
 	if s.renaming {
 		return lipgloss.JoinVertical(lipgloss.Left,
 			s.list.View(),
 			s.renameInput.View(),
+			hint,
 		)
 	}
 	if len(s.list.Items()) == 0 {
@@ -218,9 +228,9 @@ func (s SidebarModel) View() string {
 			Padding(1, 2).
 			Render("No sessions.\nPress n to create one.")
 		title := s.styles.Title.Padding(0, 1).Render("claudemux")
-		return lipgloss.JoinVertical(lipgloss.Left, title, empty)
+		return lipgloss.JoinVertical(lipgloss.Left, title, empty, hint)
 	}
-	return s.list.View()
+	return lipgloss.JoinVertical(lipgloss.Left, s.list.View(), hint)
 }
 
 func truncate(s string, max int) string {
