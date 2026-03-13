@@ -1,0 +1,47 @@
+version: 2
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: claudemux
+    main: ./cmd/claudemux
+    binary: claudemux
+    goos:
+      - darwin
+      - linux
+    goarch:
+      - amd64
+      - arm64
+    env:
+      - CGO_ENABLED=0
+    ldflags:
+      - -s -w
+
+archives:
+  - id: claudemux
+    name_template: "{{ .ProjectName }}_{{ .Os }}_{{ .Arch }}"
+    format: tar.gz
+    format_overrides:
+      - goos: windows
+        format: zip
+
+checksum:
+  name_template: checksums.txt
+
+release:
+  github:
+    owner: lord
+    name: claudemux
+
+brews:
+  - name: claudemux
+    repository:
+      owner: lord
+      name: homebrew-tap
+    homepage: https://github.com/lord/claudemux
+    description: A lazygit-style TUI for managing Claude Code sessions
+    license: MIT
+    install: |
+      bin.install "claudemux"
