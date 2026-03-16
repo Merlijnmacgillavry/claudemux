@@ -19,7 +19,7 @@ import (
 	tmuxpkg "github.com/merlijnmacgillavry/claudemux/internal/tmux"
 )
 
-var ansiEscape = regexp.MustCompile(`\x1b\[[0-9;:;]*[a-zA-Z]|\x1b[^[]`)
+var ansiEscape = regexp.MustCompile(`\x1b\[[\x30-\x3f]*[\x40-\x7e]|\x1b[^[]`)
 
 // idlePrompt matches a line where ❯ appears with nothing but whitespace after
 // it — the Claude Code idle prompt. This distinguishes it from the submitted-
@@ -224,11 +224,6 @@ func (m *RootModel) tickInterval() time.Duration {
 	}
 }
 
-func startBgPollTick() tea.Cmd {
-	return tea.Tick(5*time.Second, func(time.Time) tea.Msg {
-		return bgPollTickMsg{}
-	})
-}
 
 func createWindow(client *tmuxpkg.Client, store *session.Store, claudeBinary, displayName, cwd string, skipPerms bool, scrollback int) tea.Cmd {
 	startedAt := time.Now()
@@ -318,7 +313,7 @@ func NewRootModel() *RootModel {
 }
 
 func (m *RootModel) Init() tea.Cmd {
-	return tea.Batch(ensureTmuxSession(m.tmux), startBgPollTick())
+	return tea.Batch(ensureTmuxSession(m.tmux), func() tea.Msg { return bgPollTickMsg{} })
 }
 
 func (m *RootModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -352,14 +347,11 @@ func (m *RootModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, startTick(m.tickGeneration, 1*time.Second)
 
 	case bgPollTickMsg:
-		// Poll background (non-active) windows for waiting-for-input state.
-		// Uses pollCaptureBg so results never restart the active tick chain.
-		// Sessions already known to be waiting are skipped — their state won't
-		// change until the user sends them input, so polling is wasteful.
-		// Cap concurrent polls at 3 to avoid subprocess storms with many sessions.
+		// One-shot sweep on startup: poll all background windows to pick up any
+		// sessions that went idle before hooks were installed this run.
+		// After this, the hook path handles all further notifications.
 		const maxBgPolls = 3
 		var cmds []tea.Cmd
-		cmds = append(cmds, startBgPollTick())
 		pollCount := 0
 		for _, item := range m.sidebar.list.Items() {
 			if pollCount >= maxBgPolls {
@@ -479,11 +471,12 @@ func (m *RootModel) sessions(infos []session.SessionInfo) {
 	items := make([]SessionItem, len(infos))
 	for i, s := range infos {
 		items[i] = SessionItem{
-			ID:         s.ID,
-			Name:       s.Name,
-			LastActive: s.LastActive,
-			IsRunning:  s.Status == session.StatusRunning,
-			WorkingDir: s.Project,
+			ID:            s.ID,
+			Name:          s.Name,
+			LastActive:    s.LastActive,
+			IsRunning:     s.Status == session.StatusRunning,
+			WorkingDir:    s.Project,
+			WaitsForInput: m.waitingWindows[s.ID],
 		}
 	}
 	m.sidebar.SetSessions(items)
