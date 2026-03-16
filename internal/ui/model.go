@@ -14,6 +14,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	claudepkg "github.com/merlijnmacgillavry/claudemux/internal/claude"
 	"github.com/merlijnmacgillavry/claudemux/internal/config"
+	"github.com/merlijnmacgillavry/claudemux/internal/hooks"
 	"github.com/merlijnmacgillavry/claudemux/internal/session"
 	tmuxpkg "github.com/merlijnmacgillavry/claudemux/internal/tmux"
 )
@@ -251,6 +252,9 @@ func createWindow(client *tmuxpkg.Client, store *session.Store, claudeBinary, di
 		if scrollback > 0 {
 			store.SetScrollback(windowName, scrollback)
 		}
+		if skipPerms {
+			store.SetSkipPermissions(windowName, true)
+		}
 		cfg := store.GetConfig()
 		_ = cfg.Save()
 		return windowCreatedMsg{windowName: windowName, displayName: displayName, cwd: cwd, startedAt: startedAt}
@@ -444,6 +448,12 @@ func (m *RootModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		cfg := m.store.GetConfig()
 		_ = cfg.Save()
 
+	case hooks.HookNotificationMsg:
+		// Instant notification from a Claude Code hook: mark the window as
+		// waiting for input without waiting for the next background poll.
+		m.waitingWindows[msg.WindowName] = true
+		m.sidebar.SetWaiting(msg.WindowName, true)
+
 	case noopMsg:
 		// nothing to do
 
@@ -582,7 +592,7 @@ func (m *RootModel) handleNormalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			if scrollback == 0 {
 				scrollback = config.DefaultScrollbackLines
 			}
-			m.dialog.ShowSettings(sel.ID, sel.Name, scrollback)
+			m.dialog.ShowSettings(sel.ID, sel.Name, scrollback, meta.SkipPermissions)
 			m.mode = ModeDialog
 			m.statusBar.SetMode(m.mode)
 		}
@@ -750,6 +760,7 @@ func (m *RootModel) confirmDialog() (tea.Model, tea.Cmd) {
 
 	case DialogSettings:
 		id := m.dialog.SessionID()
+		name := m.dialog.sessionName
 		if id != "" {
 			lines, err := strconv.Atoi(strings.TrimSpace(m.dialog.InputValue()))
 			if err != nil || lines < 100 {
@@ -758,13 +769,44 @@ func (m *RootModel) confirmDialog() (tea.Model, tea.Cmd) {
 			if lines > 50000 {
 				lines = 50000
 			}
+			oldMeta, _ := m.store.GetWindow(id)
+			oldSkip := oldMeta.SkipPermissions
+			newSkip := m.dialog.SettingsSkipPermissions()
 			m.store.SetScrollback(id, lines)
+			m.store.SetSkipPermissions(id, newSkip)
 			cfg := m.store.GetConfig()
 			_ = cfg.Save()
+			// Offer restart only when the permissions flag changed and the session is live.
+			if newSkip != oldSkip {
+				isActive := id == m.activeWindowName
+				isRunning := false
+				for _, item := range m.sidebar.list.Items() {
+					if sess, ok := item.(SessionItem); ok && sess.ID == id {
+						isRunning = sess.IsRunning
+						break
+					}
+				}
+				if isRunning || isActive {
+					m.dialog.ShowConfirmRestart(id, name)
+					// stay in ModeDialog
+					return m, nil
+				}
+			}
 		}
 		m.dialog.Close()
 		m.mode = ModeNormal
 		m.statusBar.SetMode(m.mode)
+		return m, nil
+
+	case DialogConfirmRestart:
+		id := m.dialog.SessionID()
+		name := m.dialog.sessionName
+		m.dialog.Close()
+		m.mode = ModeNormal
+		m.statusBar.SetMode(m.mode)
+		if id != "" {
+			return m, m.openWindow(id, name, false)
+		}
 		return m, nil
 	}
 
@@ -820,11 +862,12 @@ func (m *RootModel) openWindow(windowName, displayName string, isRunning bool) t
 
 	if !isRunning {
 		meta, _ := m.store.GetWindow(windowName)
-		var claudeCmd string
+		claudeCmd := m.claudeBinary
+		if meta.SkipPermissions {
+			claudeCmd += " --dangerously-skip-permissions"
+		}
 		if meta.ClaudeSessionID != "" {
-			claudeCmd = m.claudeBinary + " resume " + meta.ClaudeSessionID
-		} else {
-			claudeCmd = m.claudeBinary
+			claudeCmd += " resume " + meta.ClaudeSessionID
 		}
 		_ = m.tmux.RespawnPane(windowName, claudeCmd, meta.WorkingDir)
 	}

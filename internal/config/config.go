@@ -23,7 +23,8 @@ type WindowMeta struct {
 	WorkingDir      string    `json:"workingDir,omitempty"`
 	ClaudeSessionID string    `json:"claudeSessionID,omitempty"`
 	CreatedAt       time.Time `json:"createdAt"`
-	Scrollback      int       `json:"scrollback,omitempty"` // 0 means use DefaultScrollback
+	Scrollback      int       `json:"scrollback,omitempty"`      // 0 means use DefaultScrollback
+	SkipPermissions bool      `json:"skipPermissions,omitempty"` // pass --dangerously-skip-permissions on respawn
 }
 
 // Config is the top-level application configuration.

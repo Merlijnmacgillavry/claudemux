@@ -28,6 +28,11 @@ func HistoryPath() string {
 	return filepath.Join(ClaudeHomePath(), "history.jsonl")
 }
 
+// SettingsPath returns the path to ~/.claude/settings.json
+func SettingsPath() string {
+	return filepath.Join(ClaudeHomePath(), "settings.json")
+}
+
 // EncodePath encodes a path for use in Claude's directory naming convention.
 func EncodePath(path string) string {
 	encoded := strings.ReplaceAll(path, "/", "-")

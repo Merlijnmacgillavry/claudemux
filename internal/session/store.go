@@ -79,6 +79,13 @@ func (s *Store) SetScrollback(windowName string, lines int) {
 	s.cfg.Windows[windowName] = meta
 }
 
+// SetSkipPermissions updates the --dangerously-skip-permissions flag for an existing window.
+func (s *Store) SetSkipPermissions(windowName string, skip bool) {
+	meta := s.cfg.Windows[windowName]
+	meta.SkipPermissions = skip
+	s.cfg.Windows[windowName] = meta
+}
+
 // GetConfig returns the underlying config (for saving).
 func (s *Store) GetConfig() config.Config {
 	return s.cfg

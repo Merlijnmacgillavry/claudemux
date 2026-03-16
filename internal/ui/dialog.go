@@ -23,6 +23,7 @@ const (
 	DialogDelete
 	DialogHelp
 	DialogSettings
+	DialogConfirmRestart
 )
 
 // dirPickState is a lightweight searchable directory picker.
@@ -198,6 +199,9 @@ type DialogModel struct {
 	skipPermissions bool
 	scrollbackInput textinput.Model // second input: scrollback lines in new-session dialog
 	newSessionField int             // 0=name, 1=scrollback, 2=permissions
+
+	// settings dialog options
+	settingsField int // 0=scrollback, 1=permissions
 }
 
 func NewDialogModel(styles Styles) DialogModel {
@@ -261,7 +265,16 @@ func (d *DialogModel) ShowHelp() {
 	d.input.Blur()
 }
 
-func (d *DialogModel) ShowSettings(id, name string, scrollback int) {
+func (d *DialogModel) ShowConfirmRestart(id, name string) {
+	d.dialogType = DialogConfirmRestart
+	d.title = "Restart Session?"
+	d.sessionID = id
+	d.sessionName = name
+	d.message = "Restart \"" + name + "\" to apply permissions change?"
+	d.input.Blur()
+}
+
+func (d *DialogModel) ShowSettings(id, name string, scrollback int, skipPerms bool) {
 	d.dialogType = DialogSettings
 	d.title = "Session Settings"
 	d.sessionID = id
@@ -269,6 +282,13 @@ func (d *DialogModel) ShowSettings(id, name string, scrollback int) {
 	d.input.Placeholder = "Scrollback lines (default 2000)"
 	d.input.SetValue(strconv.Itoa(scrollback))
 	d.input.Focus()
+	d.skipPermissions = skipPerms
+	d.settingsField = 0
+}
+
+// SettingsSkipPermissions returns the skip-permissions toggle state from the settings dialog.
+func (d DialogModel) SettingsSkipPermissions() bool {
+	return d.skipPermissions
 }
 
 func (d *DialogModel) Close() {
@@ -349,7 +369,24 @@ func (d DialogModel) Update(msg tea.Msg) (DialogModel, tea.Cmd) {
 			}
 		}
 	case DialogSettings:
-		d.input, cmd = d.input.Update(msg)
+		if k, ok := msg.(tea.KeyMsg); ok && k.Type == tea.KeyTab {
+			d.settingsField = (d.settingsField + 1) % 2
+			switch d.settingsField {
+			case 0:
+				d.input.Focus()
+			case 1:
+				d.input.Blur()
+			}
+			return d, nil
+		}
+		switch d.settingsField {
+		case 0:
+			d.input, cmd = d.input.Update(msg)
+		case 1:
+			if k, ok := msg.(tea.KeyMsg); ok && k.String() == " " {
+				d.skipPermissions = !d.skipPermissions
+			}
+		}
 	default:
 		d.input, cmd = d.input.Update(msg)
 	}
@@ -363,9 +400,21 @@ func (d DialogModel) View(screenWidth, screenHeight int) string {
 
 	switch d.dialogType {
 	case DialogNewSession:
-		checkbox := "[ ] --dangerously-skip-permissions"
-		if d.skipPermissions {
+		var checkbox string
+		if d.newSessionField == 2 {
+			// field is focused: always show highlight so the user can see where they are
+			checkmark := "[ ]"
+			if d.skipPermissions {
+				checkmark = "[✓]"
+			}
+			checkbox = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("#FBBF24")).
+				Bold(true).
+				Render(checkmark + " --dangerously-skip-permissions")
+		} else if d.skipPermissions {
 			checkbox = lipgloss.NewStyle().Foreground(lipgloss.Color("#FBBF24")).Render("[✓] --dangerously-skip-permissions")
+		} else {
+			checkbox = "[ ] --dangerously-skip-permissions"
 		}
 		body = lipgloss.JoinVertical(lipgloss.Left,
 			d.styles.DialogTitle.Render(d.title),
@@ -416,7 +465,30 @@ func (d DialogModel) View(screenWidth, screenHeight int) string {
 			hint.Render("enter to confirm  esc to cancel"),
 		)
 
+	case DialogConfirmRestart:
+		body = lipgloss.JoinVertical(lipgloss.Left,
+			d.styles.DialogTitle.Render(d.title),
+			"",
+			lipgloss.NewStyle().Foreground(lipgloss.Color("#E9D5FF")).Render(d.message),
+			"",
+			hint.Render("enter to restart now  esc to keep running"),
+		)
+
 	case DialogSettings:
+		var checkbox string
+		if d.settingsField == 1 {
+			checkmark := "[ ]"
+			if d.skipPermissions {
+				checkmark = "[✓]"
+			}
+			checkbox = lipgloss.NewStyle().Foreground(lipgloss.Color("#FBBF24")).Bold(true).
+				Render(checkmark + " --dangerously-skip-permissions")
+		} else if d.skipPermissions {
+			checkbox = lipgloss.NewStyle().Foreground(lipgloss.Color("#FBBF24")).
+				Render("[✓] --dangerously-skip-permissions")
+		} else {
+			checkbox = "[ ] --dangerously-skip-permissions"
+		}
 		body = lipgloss.JoinVertical(lipgloss.Left,
 			d.styles.DialogTitle.Render(d.title),
 			"",
@@ -425,7 +497,9 @@ func (d DialogModel) View(screenWidth, screenHeight int) string {
 			"Scrollback lines:",
 			d.input.View(),
 			"",
-			hint.Render("enter to confirm  esc to cancel"),
+			checkbox,
+			"",
+			hint.Render("tab to cycle fields  space to toggle  enter to confirm  esc to cancel"),
 		)
 
 	case DialogHelp:
