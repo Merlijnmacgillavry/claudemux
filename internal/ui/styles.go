@@ -18,6 +18,7 @@ type Styles struct {
 	StoppedIcon    lipgloss.Style
 	DialogBorder   lipgloss.Style
 	DialogTitle    lipgloss.Style
+	AccentBar      lipgloss.Style
 }
 
 func DefaultStyles() Styles {
@@ -69,5 +70,7 @@ func DefaultStyles() Styles {
 			Bold(true).
 			Foreground(lipgloss.Color(t.Text)).
 			MarginBottom(1),
+		AccentBar: lipgloss.NewStyle().
+			Foreground(lipgloss.Color(t.Primary)),
 	}
 }

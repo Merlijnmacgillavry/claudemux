@@ -33,7 +33,7 @@ type SessionDelegate struct {
 }
 
 func (d SessionDelegate) Height() int                              { return 2 }
-func (d SessionDelegate) Spacing() int                            { return 0 }
+func (d SessionDelegate) Spacing() int                            { return 1 }
 func (d SessionDelegate) Update(_ tea.Msg, _ *list.Model) tea.Cmd { return nil }
 
 func (d SessionDelegate) Render(w io.Writer, m list.Model, index int, item list.Item) {
@@ -43,6 +43,7 @@ func (d SessionDelegate) Render(w io.Writer, m list.Model, index int, item list.
 	}
 
 	isSelected := index == m.Index()
+	availWidth := m.Width()
 
 	icon := d.styles.StoppedIcon.Render("○")
 	if s.IsRunning {
@@ -59,19 +60,21 @@ func (d SessionDelegate) Render(w io.Writer, m list.Model, index int, item list.
 	var line1, line2 string
 	if isSelected {
 		selBg := d.styles.SelectedItem.GetBackground()
-		bg := lipgloss.NewStyle().Background(selBg)
+		bg := lipgloss.NewStyle().Background(selBg).Width(availWidth - 1)
 		boldName := d.styles.SessionName.Copy().Background(selBg).Bold(true).Render(name)
-		line1 = bg.Render(fmt.Sprintf(" %s %s", icon, boldName))
-		line2 = bg.Render(fmt.Sprintf("   %s %s",
+		accent := d.styles.AccentBar.Render("▎")
+		line1 = accent + bg.Render(fmt.Sprintf("%s %s", icon, boldName))
+		line2 = " " + bg.Render(fmt.Sprintf("  %s %s",
 			d.styles.SessionPreview.Copy().Background(selBg).Render(preview),
 			d.styles.Timestamp.Copy().Background(selBg).Render(timeStr),
 		))
 	} else {
-		line1 = fmt.Sprintf(" %s %s", icon, d.styles.NormalItem.Render(name))
-		line2 = fmt.Sprintf("   %s %s",
+		bg := lipgloss.NewStyle().Width(availWidth - 1)
+		line1 = " " + bg.Render(fmt.Sprintf("%s %s", icon, d.styles.NormalItem.Render(name)))
+		line2 = " " + bg.Render(fmt.Sprintf("  %s %s",
 			d.styles.SessionPreview.Render(preview),
 			d.styles.Timestamp.Render(timeStr),
-		)
+		))
 	}
 
 	fmt.Fprintf(w, "%s\n%s", line1, line2)
@@ -142,7 +145,7 @@ func (s *SidebarModel) SetWaiting(windowID string, waiting bool) {
 // Layout: row 0 = top border, row 1 = list title, rows 2+ = items (2 rows each).
 // Returns -1 if the click falls outside the item area.
 func (s *SidebarModel) IndexByClick(screenY int) int {
-	idx := (screenY - 2) / 2
+	idx := (screenY - 2) / 3
 	if idx < 0 || idx >= len(s.list.Items()) {
 		return -1
 	}
