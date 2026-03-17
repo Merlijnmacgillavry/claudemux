@@ -7,10 +7,16 @@ import (
 	"strings"
 )
 
+// hookCmd is a single hook command within a hook group.
+type hookCmd struct {
+	Type    string `json:"type"`
+	Command string `json:"command"`
+}
+
 // hookEntry is a single entry in a Claude Code hooks list.
 type hookEntry struct {
-	Matcher string `json:"matcher"`
-	Command string `json:"command"`
+	Matcher string    `json:"matcher"`
+	Hooks   []hookCmd `json:"hooks"`
 }
 
 // settingsPath returns ~/.claude/settings.json.
@@ -47,18 +53,45 @@ func InstallHooks(claudemuxBinary, socketPath string) error {
 		if raw, ok := hooks[event]; ok {
 			if arr, ok := raw.([]interface{}); ok {
 				for _, item := range arr {
-					if m, ok := item.(map[string]interface{}); ok {
-						c, _ := m["command"].(string)
-						if strings.Contains(c, "claudemux notify") {
-							continue
+					m, ok := item.(map[string]interface{})
+					if !ok {
+						continue
+					}
+					// Check inner hooks array for any claudemux notify command.
+					isClaudemux := false
+					if inner, ok := m["hooks"].([]interface{}); ok {
+						for _, h := range inner {
+							if hm, ok := h.(map[string]interface{}); ok {
+								if c, _ := hm["command"].(string); strings.Contains(c, "claudemux notify") {
+									isClaudemux = true
+									break
+								}
+							}
 						}
-						ma, _ := m["matcher"].(string)
-						entries = append(entries, hookEntry{Matcher: ma, Command: c})
+					}
+					// Also check legacy flat format during migration.
+					if c, _ := m["command"].(string); strings.Contains(c, "claudemux notify") {
+						isClaudemux = true
+					}
+					if isClaudemux {
+						continue
+					}
+					ma, _ := m["matcher"].(string)
+					// Re-marshal existing entry to preserve its structure.
+					if data, err := json.Marshal(m); err == nil {
+						var e hookEntry
+						if json.Unmarshal(data, &e) == nil {
+							e.Matcher = ma
+							entries = append(entries, e)
+						}
 					}
 				}
 			}
 		}
-		entries = append(entries, hookEntry{Matcher: "", Command: cmd})
+		entries = append(entries, hookEntry{
+			Matcher: "",
+			Hooks:   []hookCmd{{Type: "command", Command: cmd}},
+		})
 		hooks[event] = entries
 	}
 
@@ -86,11 +119,29 @@ func UninstallHooks() error {
 		}
 		var kept []interface{}
 		for _, item := range arr {
-			if m, ok := item.(map[string]interface{}); ok {
-				c, _ := m["command"].(string)
-				if !strings.Contains(c, "claudemux notify") {
-					kept = append(kept, item)
+			m, ok := item.(map[string]interface{})
+			if !ok {
+				kept = append(kept, item)
+				continue
+			}
+			isClaudemux := false
+			// Check nested hooks array.
+			if inner, ok := m["hooks"].([]interface{}); ok {
+				for _, h := range inner {
+					if hm, ok := h.(map[string]interface{}); ok {
+						if c, _ := hm["command"].(string); strings.Contains(c, "claudemux notify") {
+							isClaudemux = true
+							break
+						}
+					}
 				}
+			}
+			// Check legacy flat format.
+			if c, _ := m["command"].(string); strings.Contains(c, "claudemux notify") {
+				isClaudemux = true
+			}
+			if !isClaudemux {
+				kept = append(kept, item)
 			}
 		}
 		if len(kept) == 0 {
