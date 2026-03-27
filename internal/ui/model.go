@@ -217,12 +217,27 @@ func startTick(gen uint64, d time.Duration) tea.Cmd {
 func (m *RootModel) tickInterval() time.Duration {
 	switch {
 	case m.unchangedTicks < 5:
-		return 100 * time.Millisecond
+		return 16 * time.Millisecond // ~60fps; capture-pane at small depth is ~5ms
 	case m.unchangedTicks < 20:
 		return 250 * time.Millisecond
 	default:
 		return 1 * time.Second
 	}
+}
+
+// captureDepth returns how many lines back to request from capture-pane.
+// While content is actively changing, only capture what's visible — this is
+// ~5ms vs ~100ms for a full 2000-line scrollback. Once content stabilises,
+// switch to the full configured scrollback so history is available to scroll.
+func (m *RootModel) captureDepth() int {
+	if m.unchangedTicks < 5 {
+		h := m.mainPane.viewport.Height
+		if h < 20 {
+			h = 20
+		}
+		return h + 15 // visible lines + a small buffer
+	}
+	return m.paneHeight()
 }
 
 
@@ -285,6 +300,7 @@ type RootModel struct {
 	respawnCount    map[string]int       // consecutive respawn attempts per window
 	lastRespawnTime map[string]time.Time // time of last respawn per window
 
+	resizeSem      chan struct{} // limits concurrent resize-window subprocesses to 1
 	sessionsLoaded bool
 }
 
@@ -310,6 +326,7 @@ func NewRootModel() *RootModel {
 		waitingWindows:  make(map[string]bool),
 		respawnCount:    make(map[string]int),
 		lastRespawnTime: make(map[string]time.Time),
+		resizeSem:       make(chan struct{}, 1),
 	}
 }
 
@@ -342,8 +359,7 @@ func (m *RootModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		if m.activeWindowName != "" {
-			paneH := m.paneHeight()
-			return m, pollCapture(m.tmux, m.activeWindowName, paneH, m.tickGeneration)
+			return m, pollCapture(m.tmux, m.activeWindowName, m.captureDepth(), m.tickGeneration)
 		}
 		return m, startTick(m.tickGeneration, 1*time.Second)
 
@@ -636,20 +652,27 @@ func (m *RootModel) handleInsertKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// Shift+Enter → send kitty-protocol Shift+Enter sequence to Claude Code.
 		// Requires a terminal that emits \x1b[13;2u (kitty keyboard protocol).
 		if msg.String() == "shift+enter" {
-			m.tickGeneration++
+			needsFastTick := m.unchangedTicks >= 5
 			m.unchangedTicks = 0
-			return m, tea.Batch(
-				sendKeyCmd(m.tmux, m.activeWindowName, "\x1b[13;2u", true),
-				pollCapture(m.tmux, m.activeWindowName, m.mainPane.viewport.Height, m.tickGeneration),
-			)
+			sendCmd := sendKeyCmd(m.tmux, m.activeWindowName, "\x1b[13;2u", true)
+			if needsFastTick {
+				m.tickGeneration++
+				return m, tea.Batch(sendCmd, startTick(m.tickGeneration, 16*time.Millisecond))
+			}
+			return m, sendCmd
 		}
 		if evt := tmuxpkg.KeyMsgToTmux(msg); evt != nil {
-			m.tickGeneration++
-			m.unchangedTicks = 0 // reset so the next tick fires at 100ms
-			return m, tea.Batch(
-				sendKeyCmd(m.tmux, m.activeWindowName, evt.Key, evt.Literal),
-				pollCapture(m.tmux, m.activeWindowName, m.mainPane.viewport.Height, m.tickGeneration),
-			)
+			// Only restart the tick chain if we were in slow-poll mode (idle).
+			// If already polling at 100ms, let the existing tick fire naturally —
+			// resetting it on every keystroke starves the display during fast typing.
+			needsFastTick := m.unchangedTicks >= 5
+			m.unchangedTicks = 0
+			cmd := sendKeyCmd(m.tmux, m.activeWindowName, evt.Key, evt.Literal)
+			if needsFastTick {
+				m.tickGeneration++
+				return m, tea.Batch(cmd, startTick(m.tickGeneration, 16*time.Millisecond))
+			}
+			return m, cmd
 		}
 	}
 	return m, nil
@@ -882,7 +905,15 @@ func (m *RootModel) openWindow(windowName, displayName string, isRunning bool) t
 	tw := mw - 3
 	th := ph - 3
 	if tw > 0 && th > 0 {
-		go m.tmux.ResizeWindow(windowName, tw, th)
+		select {
+		case m.resizeSem <- struct{}{}:
+			go func() {
+				defer func() { <-m.resizeSem }()
+				_ = m.tmux.ResizeWindow(windowName, tw, th)
+			}()
+		default:
+			// A resize is already in flight; skip this one.
+		}
 	}
 
 	return pollCapture(m.tmux, windowName, paneH, m.tickGeneration)
@@ -913,7 +944,16 @@ func (m *RootModel) resize() {
 		tw := mainWidth - 3  // border(2) + scrollbar(1)
 		th := paneHeight - 3 // border(2) + title(1)
 		if tw > 0 && th > 0 {
-			go m.tmux.ResizeWindow(m.activeWindowName, tw, th)
+			select {
+			case m.resizeSem <- struct{}{}:
+				wn := m.activeWindowName
+				go func() {
+					defer func() { <-m.resizeSem }()
+					_ = m.tmux.ResizeWindow(wn, tw, th)
+				}()
+			default:
+				// A resize is already in flight; skip this one.
+			}
 		}
 	}
 }

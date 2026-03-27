@@ -28,15 +28,21 @@ type MainPaneModel struct {
 	sessionName string
 	hasSession  bool
 	content     string
+	totalLines  int // cached line count; updated with content
 	selection   Selection
+	thumbStyle  lipgloss.Style
+	trackStyle  lipgloss.Style
 }
 
 func NewMainPaneModel(styles Styles) MainPaneModel {
 	vp := viewport.New(0, 0)
 	vp.SetContent("")
 	return MainPaneModel{
-		viewport: vp,
-		styles:   styles,
+		viewport:   vp,
+		styles:     styles,
+		totalLines: 1,
+		thumbStyle: lipgloss.NewStyle().Foreground(lipgloss.Color("#E9D5FF")),
+		trackStyle: lipgloss.NewStyle().Foreground(lipgloss.Color("#3F3F46")),
 	}
 }
 
@@ -56,6 +62,7 @@ func (m *MainPaneModel) ClearSession() {
 	m.sessionName = ""
 	m.hasSession = false
 	m.content = ""
+	m.totalLines = 1
 	m.selection = Selection{}
 	m.viewport.SetContent("")
 }
@@ -67,6 +74,7 @@ func (m *MainPaneModel) AppendContent(data string) {
 	if len(m.content) > maxContentBytes {
 		m.content = m.content[len(m.content)-maxContentBytes:]
 	}
+	m.totalLines = strings.Count(m.content, "\n") + 1
 	m.viewport.SetContent(m.content)
 	m.viewport.GotoBottom()
 }
@@ -83,12 +91,14 @@ func (m *MainPaneModel) SetContent(data string) {
 		data = cut
 	}
 	m.content = data
+	m.totalLines = strings.Count(m.content, "\n") + 1
 	m.viewport.SetContent(m.content)
 	m.viewport.GotoBottom()
 }
 
 func (m *MainPaneModel) ClearContent() {
 	m.content = ""
+	m.totalLines = 1
 	m.viewport.SetContent("")
 }
 
@@ -295,10 +305,7 @@ func (m MainPaneModel) View() string {
 	// Build scrollbar alongside the viewport lines.
 	vpLines := strings.Split(vpView, "\n")
 	visibleLines := m.viewport.Height
-	totalLines := strings.Count(m.content, "\n") + 1
-
-	thumbStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#E9D5FF"))
-	trackStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#3F3F46"))
+	totalLines := m.totalLines
 
 	showScrollbar := totalLines > visibleLines
 	var thumbStart, thumbEnd int
@@ -317,9 +324,9 @@ func (m MainPaneModel) View() string {
 		sb.WriteString(line)
 		if showScrollbar && i < visibleLines {
 			if i >= thumbStart && i < thumbEnd {
-				sb.WriteString(thumbStyle.Render("┃"))
+				sb.WriteString(m.thumbStyle.Render("┃"))
 			} else {
-				sb.WriteString(trackStyle.Render("│"))
+				sb.WriteString(m.trackStyle.Render("│"))
 			}
 		}
 		if i < len(vpLines)-1 {
