@@ -27,6 +27,7 @@ type MainPaneModel struct {
 	styles      Styles
 	sessionName string
 	hasSession  bool
+	gitBranch   string
 	content     string
 	totalLines  int // cached line count; updated with content
 	selection   Selection
@@ -56,11 +57,17 @@ func (m *MainPaneModel) SetSize(w, h int) {
 func (m *MainPaneModel) SetSession(name string) {
 	m.sessionName = name
 	m.hasSession = true
+	m.gitBranch = ""
+}
+
+func (m *MainPaneModel) SetGitBranch(branch string) {
+	m.gitBranch = branch
 }
 
 func (m *MainPaneModel) ClearSession() {
 	m.sessionName = ""
 	m.hasSession = false
+	m.gitBranch = ""
 	m.content = ""
 	m.totalLines = 1
 	m.selection = Selection{}
@@ -299,7 +306,12 @@ func (m MainPaneModel) View() string {
 		return placeholder
 	}
 
-	title := m.styles.Title.Padding(0, 1).Render(m.sessionName)
+	titleText := m.sessionName
+	if m.gitBranch != "" {
+		branchStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#A78BFA"))
+		titleText += "  " + branchStyle.Render(" "+m.gitBranch)
+	}
+	title := m.styles.Title.Padding(0, 1).Render(titleText)
 	vpView := m.viewport.View()
 
 	// Build scrollbar alongside the viewport lines.

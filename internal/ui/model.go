@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"hash/crc32"
 	"os"
+	"os/exec"
 	"regexp"
 	"strconv"
 	"strings"
@@ -92,6 +93,11 @@ type sessionIDDetectedMsg struct {
 type tmuxTickMsg struct{ generation uint64 }
 type bgPollTickMsg struct{}
 
+type gitBranchMsg struct {
+	windowName string
+	branch     string
+}
+
 type windowCreatedMsg struct {
 	windowName  string
 	displayName string
@@ -148,6 +154,30 @@ func discoverWindows(client *tmuxpkg.Client, store *session.Store) tea.Cmd {
 		}
 		return windowsDiscoveredMsg{sessions: infos}
 	}
+}
+
+func fetchGitBranch(windowName, workingDir string) tea.Cmd {
+	return func() tea.Msg {
+		if workingDir == "" {
+			return noopMsg{}
+		}
+		// Run git in the session's working directory.
+		cmd := fmt.Sprintf("git -C %s rev-parse --abbrev-ref HEAD 2>/dev/null", shellQuote(workingDir))
+		result, execErr := runShell(cmd)
+		if execErr != nil || strings.TrimSpace(result) == "" || strings.TrimSpace(result) == "HEAD" {
+			return noopMsg{}
+		}
+		return gitBranchMsg{windowName: windowName, branch: strings.TrimSpace(result)}
+	}
+}
+
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
+}
+
+func runShell(cmd string) (string, error) {
+	out, err := exec.Command("sh", "-c", cmd).Output()
+	return string(out), err
 }
 
 func pollCapture(client *tmuxpkg.Client, windowName string, height int, gen uint64) tea.Cmd {
@@ -479,6 +509,11 @@ func (m *RootModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case noopMsg:
 		// nothing to do
+
+	case gitBranchMsg:
+		if msg.windowName == m.activeWindowName {
+			m.mainPane.SetGitBranch(msg.branch)
+		}
 
 	case windowCreatedMsg:
 		cmd := m.openWindow(msg.windowName, msg.displayName, true)
@@ -909,7 +944,11 @@ func (m *RootModel) openWindow(windowName, displayName string, isRunning bool) t
 		}
 	}
 
-	return pollCapture(m.tmux, windowName, paneH, m.tickGeneration)
+	meta, _ := m.store.GetWindow(windowName)
+	return tea.Batch(
+		pollCapture(m.tmux, windowName, paneH, m.tickGeneration),
+		fetchGitBranch(windowName, meta.WorkingDir),
+	)
 }
 
 func (m *RootModel) paneHeight() int {
