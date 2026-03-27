@@ -456,6 +456,14 @@ func (m *RootModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case sendKeyDoneMsg:
 		if msg.err != nil {
 			m.statusBar.SetError(fmt.Sprintf("send key: %v", msg.err))
+			return m, nil
+		}
+		// Trigger an immediate capture now that the key has been delivered to
+		// tmux, rather than waiting for the next tick. This cuts display lag
+		// from (tick_wait + capture) to just (capture) ≈ 5ms.
+		if m.activeWindowName != "" {
+			m.tickGeneration++
+			return m, pollCapture(m.tmux, m.activeWindowName, m.captureDepth(), m.tickGeneration)
 		}
 
 	case sessionIDDetectedMsg:
@@ -652,27 +660,12 @@ func (m *RootModel) handleInsertKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// Shift+Enter → send kitty-protocol Shift+Enter sequence to Claude Code.
 		// Requires a terminal that emits \x1b[13;2u (kitty keyboard protocol).
 		if msg.String() == "shift+enter" {
-			needsFastTick := m.unchangedTicks >= 5
 			m.unchangedTicks = 0
-			sendCmd := sendKeyCmd(m.tmux, m.activeWindowName, "\x1b[13;2u", true)
-			if needsFastTick {
-				m.tickGeneration++
-				return m, tea.Batch(sendCmd, startTick(m.tickGeneration, 16*time.Millisecond))
-			}
-			return m, sendCmd
+			return m, sendKeyCmd(m.tmux, m.activeWindowName, "\x1b[13;2u", true)
 		}
 		if evt := tmuxpkg.KeyMsgToTmux(msg); evt != nil {
-			// Only restart the tick chain if we were in slow-poll mode (idle).
-			// If already polling at 100ms, let the existing tick fire naturally —
-			// resetting it on every keystroke starves the display during fast typing.
-			needsFastTick := m.unchangedTicks >= 5
 			m.unchangedTicks = 0
-			cmd := sendKeyCmd(m.tmux, m.activeWindowName, evt.Key, evt.Literal)
-			if needsFastTick {
-				m.tickGeneration++
-				return m, tea.Batch(cmd, startTick(m.tickGeneration, 16*time.Millisecond))
-			}
-			return m, cmd
+			return m, sendKeyCmd(m.tmux, m.activeWindowName, evt.Key, evt.Literal)
 		}
 	}
 	return m, nil
