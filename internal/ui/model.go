@@ -80,7 +80,8 @@ type tmuxOutputMsg struct {
 	windowName string
 	content    string
 	isDead     bool
-	background bool // true when sent by a background poll; must not restart the active tick chain
+	background bool   // true when sent by a background poll; must not restart the active tick chain
+	generation uint64 // generation at issue time; 0 for background polls (no check)
 }
 
 type sessionIDDetectedMsg struct {
@@ -149,14 +150,14 @@ func discoverWindows(client *tmuxpkg.Client, store *session.Store) tea.Cmd {
 	}
 }
 
-func pollCapture(client *tmuxpkg.Client, windowName string, height int) tea.Cmd {
+func pollCapture(client *tmuxpkg.Client, windowName string, height int, gen uint64) tea.Cmd {
 	return func() tea.Msg {
 		content, err := client.CapturePane(windowName, height)
 		if err != nil {
 			// Window is gone entirely (remain-on-exit off, or session killed).
-			return tmuxOutputMsg{windowName: windowName, content: "", isDead: true}
+			return tmuxOutputMsg{windowName: windowName, content: "", isDead: true, generation: gen}
 		}
-		return tmuxOutputMsg{windowName: windowName, content: content}
+		return tmuxOutputMsg{windowName: windowName, content: content, generation: gen}
 	}
 }
 
@@ -342,7 +343,7 @@ func (m *RootModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if m.activeWindowName != "" {
 			paneH := m.paneHeight()
-			return m, pollCapture(m.tmux, m.activeWindowName, paneH)
+			return m, pollCapture(m.tmux, m.activeWindowName, paneH, m.tickGeneration)
 		}
 		return m, startTick(m.tickGeneration, 1*time.Second)
 
@@ -381,6 +382,12 @@ func (m *RootModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		// Background messages must not restart the active tick chain.
 		if msg.windowName != m.activeWindowName {
+			return m, nil
+		}
+
+		// Discard stale captures from a superseded generation — they would spawn
+		// a parallel tick chain at the current generation if allowed through.
+		if msg.generation != 0 && msg.generation != m.tickGeneration {
 			return m, nil
 		}
 
@@ -633,8 +640,7 @@ func (m *RootModel) handleInsertKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.unchangedTicks = 0
 			return m, tea.Batch(
 				sendKeyCmd(m.tmux, m.activeWindowName, "\x1b[13;2u", true),
-				pollCapture(m.tmux, m.activeWindowName, m.mainPane.viewport.Height),
-				startTick(m.tickGeneration, m.tickInterval()),
+				pollCapture(m.tmux, m.activeWindowName, m.mainPane.viewport.Height, m.tickGeneration),
 			)
 		}
 		if evt := tmuxpkg.KeyMsgToTmux(msg); evt != nil {
@@ -642,8 +648,7 @@ func (m *RootModel) handleInsertKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.unchangedTicks = 0 // reset so the next tick fires at 100ms
 			return m, tea.Batch(
 				sendKeyCmd(m.tmux, m.activeWindowName, evt.Key, evt.Literal),
-				pollCapture(m.tmux, m.activeWindowName, m.mainPane.viewport.Height),
-				startTick(m.tickGeneration, m.tickInterval()),
+				pollCapture(m.tmux, m.activeWindowName, m.mainPane.viewport.Height, m.tickGeneration),
 			)
 		}
 	}
@@ -880,10 +885,7 @@ func (m *RootModel) openWindow(windowName, displayName string, isRunning bool) t
 		go m.tmux.ResizeWindow(windowName, tw, th)
 	}
 
-	return tea.Batch(
-		pollCapture(m.tmux, windowName, paneH),
-		startTick(m.tickGeneration, m.tickInterval()),
-	)
+	return pollCapture(m.tmux, windowName, paneH, m.tickGeneration)
 }
 
 func (m *RootModel) paneHeight() int {

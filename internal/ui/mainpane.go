@@ -73,7 +73,16 @@ func (m *MainPaneModel) AppendContent(data string) {
 
 func (m *MainPaneModel) SetContent(data string) {
 	// capture-pane always appends a trailing newline; strip it.
-	m.content = strings.TrimRight(data, "\n")
+	data = strings.TrimRight(data, "\n")
+	if len(data) > maxContentBytes {
+		// Trim to a line boundary to avoid splitting a multi-byte sequence or ANSI code.
+		cut := data[len(data)-maxContentBytes:]
+		if idx := strings.IndexByte(cut, '\n'); idx >= 0 {
+			cut = cut[idx+1:]
+		}
+		data = cut
+	}
+	m.content = data
 	m.viewport.SetContent(m.content)
 	m.viewport.GotoBottom()
 }
