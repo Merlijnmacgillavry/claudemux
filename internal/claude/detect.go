@@ -35,9 +35,7 @@ func SettingsPath() string {
 
 // EncodePath encodes a path for use in Claude's directory naming convention.
 func EncodePath(path string) string {
-	encoded := strings.ReplaceAll(path, "/", "-")
-	encoded = strings.TrimPrefix(encoded, "-")
-	return encoded
+	return strings.ReplaceAll(path, "/", "-")
 }
 
 // LatestSessionID returns the UUID of the newest session file created after
