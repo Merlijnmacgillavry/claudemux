@@ -97,10 +97,13 @@ func (m *MainPaneModel) SetContent(data string) {
 		}
 		data = cut
 	}
+	atBottom := m.viewport.YOffset >= m.totalLines-m.viewport.Height
 	m.content = data
 	m.totalLines = strings.Count(m.content, "\n") + 1
 	m.viewport.SetContent(m.content)
-	m.viewport.GotoBottom()
+	if atBottom {
+		m.viewport.GotoBottom()
+	}
 }
 
 func (m *MainPaneModel) ClearContent() {
