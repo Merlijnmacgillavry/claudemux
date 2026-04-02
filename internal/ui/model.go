@@ -459,7 +459,6 @@ func (m *RootModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if h != m.lastCaptureHash {
 			m.lastCaptureHash = h
 			m.unchangedTicks = 0
-			m.mainPane.ClearSelection() // stale coords after content change
 			m.mainPane.SetContent(msg.content)
 			return m, startTick(m.tickGeneration, m.tickInterval())
 		}

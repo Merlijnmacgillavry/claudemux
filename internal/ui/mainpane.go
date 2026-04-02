@@ -65,7 +65,7 @@ func (m *MainPaneModel) SetGitBranch(branch string) {
 }
 
 func (m *MainPaneModel) AtBottom() bool {
-	return m.viewport.YOffset >= m.totalLines-m.viewport.Height
+	return m.viewport.YOffset >= max(0, m.totalLines-m.viewport.Height)
 }
 
 func (m *MainPaneModel) ClearSession() {
@@ -106,12 +106,22 @@ func (m *MainPaneModel) SetContent(data string) {
 	if m.selection.Active {
 		return
 	}
-	atBottom := m.viewport.YOffset >= m.totalLines-m.viewport.Height
+	atBottom := m.viewport.YOffset >= max(0, m.totalLines-m.viewport.Height)
+	savedYOffset := m.viewport.YOffset
 	m.content = data
 	m.totalLines = strings.Count(m.content, "\n") + 1
 	m.viewport.SetContent(m.content)
 	if atBottom {
 		m.viewport.GotoBottom()
+	} else {
+		// Restore scroll position — viewport.SetContent may have called
+		// GotoBottom internally when new content is shorter than YOffset.
+		// Clamp to the new maximum so we don't scroll past end of content.
+		maxY := max(0, m.totalLines-m.viewport.Height)
+		if savedYOffset > maxY {
+			savedYOffset = maxY
+		}
+		m.viewport.YOffset = savedYOffset
 	}
 }
 
