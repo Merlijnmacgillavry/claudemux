@@ -100,9 +100,14 @@ func (m *MainPaneModel) SetContent(data string) {
 	atBottom := m.viewport.YOffset >= m.totalLines-m.viewport.Height
 	m.content = data
 	m.totalLines = strings.Count(m.content, "\n") + 1
-	m.viewport.SetContent(m.content)
-	if atBottom {
-		m.viewport.GotoBottom()
+	if m.selection.Active {
+		// Keep the selection highlight intact and preserve scroll position.
+		m.refreshViewport()
+	} else {
+		m.viewport.SetContent(m.content)
+		if atBottom {
+			m.viewport.GotoBottom()
+		}
 	}
 }
 
