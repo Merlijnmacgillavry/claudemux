@@ -260,6 +260,11 @@ func (m *RootModel) tickInterval() time.Duration {
 // ~5ms vs ~100ms for a full 2000-line scrollback. Once content stabilises,
 // switch to the full configured scrollback so history is available to scroll.
 func (m *RootModel) captureDepth() int {
+	// When the user has scrolled up, always capture the full scrollback so their
+	// position is not destroyed when the fast-poll depth would be shorter.
+	if !m.mainPane.AtBottom() {
+		return m.paneHeight()
+	}
 	if m.unchangedTicks < 5 {
 		h := m.mainPane.viewport.Height
 		if h < 20 {

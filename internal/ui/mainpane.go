@@ -64,6 +64,10 @@ func (m *MainPaneModel) SetGitBranch(branch string) {
 	m.gitBranch = branch
 }
 
+func (m *MainPaneModel) AtBottom() bool {
+	return m.viewport.YOffset >= m.totalLines-m.viewport.Height
+}
+
 func (m *MainPaneModel) ClearSession() {
 	m.sessionName = ""
 	m.hasSession = false
@@ -97,17 +101,17 @@ func (m *MainPaneModel) SetContent(data string) {
 		}
 		data = cut
 	}
+	// Freeze content while the user is dragging a selection — updating the
+	// buffer shifts line coordinates and breaks the highlight.
+	if m.selection.Active {
+		return
+	}
 	atBottom := m.viewport.YOffset >= m.totalLines-m.viewport.Height
 	m.content = data
 	m.totalLines = strings.Count(m.content, "\n") + 1
-	if m.selection.Active {
-		// Keep the selection highlight intact and preserve scroll position.
-		m.refreshViewport()
-	} else {
-		m.viewport.SetContent(m.content)
-		if atBottom {
-			m.viewport.GotoBottom()
-		}
+	m.viewport.SetContent(m.content)
+	if atBottom {
+		m.viewport.GotoBottom()
 	}
 }
 
