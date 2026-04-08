@@ -123,14 +123,15 @@ func ensureTmuxSession(client *tmuxpkg.Client) tea.Cmd {
 
 func discoverWindows(client *tmuxpkg.Client, store *session.Store) tea.Cmd {
 	return func() tea.Msg {
-		tmuxWindows, err := client.ListWindows()
-		if err != nil {
-			// Session may not exist yet — return empty rather than crashing.
-			return windowsDiscoveredMsg{sessions: []session.SessionInfo{}}
-		}
+		tmuxWindows, _ := client.ListWindows()
 		stored := store.AllWindows()
-		infos := make([]session.SessionInfo, 0, len(tmuxWindows))
+
+		// Track which config entries have a live tmux window.
+		liveNames := make(map[string]bool, len(tmuxWindows))
+		infos := make([]session.SessionInfo, 0, len(stored))
+
 		for _, w := range tmuxWindows {
+			liveNames[w.Name] = true
 			meta, ok := stored[w.Name]
 			if !ok {
 				// Not a window we created — skip the initial session shell, etc.
@@ -152,6 +153,26 @@ func discoverWindows(client *tmuxpkg.Client, store *session.Store) tea.Cmd {
 				Status:     status,
 			})
 		}
+
+		// Surface sessions that exist in config but have no tmux window.
+		// This covers system restarts and manually stopped sessions.
+		for name, meta := range stored {
+			if liveNames[name] {
+				continue
+			}
+			displayName := meta.DisplayName
+			if displayName == "" {
+				displayName = "claudemux session " + name
+			}
+			infos = append(infos, session.SessionInfo{
+				ID:         name,
+				Name:       displayName,
+				Project:    meta.WorkingDir,
+				LastActive: meta.CreatedAt,
+				Status:     session.StatusStopped,
+			})
+		}
+
 		return windowsDiscoveredMsg{sessions: infos}
 	}
 }
@@ -457,9 +478,15 @@ func (m *RootModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		h := crc32.ChecksumIEEE([]byte(msg.content))
 		if h != m.lastCaptureHash {
-			m.lastCaptureHash = h
 			m.unchangedTicks = 0
 			m.mainPane.SetContent(msg.content)
+			// Only advance the hash when SetContent actually applied the data.
+			// During a drag selection SetContent is frozen, so we must not
+			// advance the hash — otherwise the next tick sees hash==h and
+			// never refreshes after the drag ends.
+			if !m.mainPane.selection.Active {
+				m.lastCaptureHash = h
+			}
 			return m, startTick(m.tickGeneration, m.tickInterval())
 		}
 		// Content unchanged — the process may have exited with remain-on-exit.
@@ -637,6 +664,25 @@ func (m *RootModel) handleNormalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.statusBar.SetMode(m.mode)
 		}
 		return m, nil
+
+	case "x":
+		sel := m.sidebar.SelectedSession()
+		if sel != nil && sel.IsRunning {
+			_ = m.tmux.KillWindow(sel.ID)
+			if sel.ID == m.activeWindowName {
+				m.activeWindowName = ""
+				m.lastCaptureHash = 0
+				m.tickGeneration++ // invalidate any in-flight ticks from this window
+				m.mainPane.ClearSession()
+				m.statusBar.SetSessionName("")
+				m.focus = SidebarFocused
+				m.mode = ModeNormal
+				m.statusBar.SetMode(m.mode)
+			}
+			delete(m.respawnCount, sel.ID)
+			delete(m.lastRespawnTime, sel.ID)
+		}
+		return m, discoverWindows(m.tmux, m.store)
 
 	case "d":
 		sel := m.sidebar.SelectedSession()
@@ -922,7 +968,13 @@ func (m *RootModel) openWindow(windowName, displayName string, isRunning bool) t
 		if meta.ClaudeSessionID != "" {
 			claudeCmd += " resume " + meta.ClaudeSessionID
 		}
-		_ = m.tmux.RespawnPane(windowName, claudeCmd, meta.WorkingDir)
+		if err := m.tmux.RespawnPane(windowName, claudeCmd, meta.WorkingDir); err != nil {
+			// Window doesn't exist (e.g. after a system restart or manual stop).
+			// Create it fresh with the same name so the config key remains stable.
+			if _, sessErr := m.tmux.EnsureSession(); sessErr == nil {
+				_ = m.tmux.NewWindow(windowName, claudeCmd, meta.WorkingDir)
+			}
+		}
 	}
 
 	// Increment the generation to invalidate any tick messages still in flight
@@ -1092,6 +1144,12 @@ func (m *RootModel) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 				_ = clipboard.WriteAll(text)
 			}
 			m.mainPane.ClearSelection()
+			// Force an immediate content refresh: the hash was not advanced
+			// while SetContent was frozen, but unchangedTicks may have grown
+			// during the drag, slowing the tick interval. Reset both so the
+			// display snaps back to current tmux output on the next tick.
+			m.lastCaptureHash = 0
+			m.unchangedTicks = 0
 		} else {
 			// Plain click with no drag → enter INSERT mode as before.
 			m.mainPane.ClearSelection()

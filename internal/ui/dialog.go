@@ -513,6 +513,7 @@ func (d DialogModel) View(screenWidth, screenHeight int) string {
 			"  n          new session",
 			"  r          rename session",
 			"  s          session settings",
+			"  x          stop session (keep metadata)",
 			"  d          delete session",
 			"  /          search sessions",
 			"  [/]        resize sidebar",

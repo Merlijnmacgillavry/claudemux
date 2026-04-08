@@ -160,10 +160,17 @@ func (c *Client) CapturePane(windowName string, height int) (string, error) {
 	return out, err
 }
 
+// sendKeysArgLimit is a conservative cap on the literal string passed to
+// send-keys. tmux rejects longer strings with "command too long".
+const sendKeysArgLimit = 1000
+
 // SendKey sends a keystroke to the named window.
 // If literal is true, the key is sent as raw characters (-l flag).
 // If literal is false, key is a tmux key name such as "Enter" or "C-c".
 func (c *Client) SendKey(windowName, key string, literal bool) error {
+	if literal && len(key) > sendKeysArgLimit {
+		return c.sendLiteralLarge(windowName, key)
+	}
 	args := []string{"send-keys", "-t", c.target(windowName)}
 	if literal {
 		args = append(args, "-l", key)
@@ -171,6 +178,27 @@ func (c *Client) SendKey(windowName, key string, literal bool) error {
 		args = append(args, key)
 	}
 	_, err := c.run(args...)
+	return err
+}
+
+// sendLiteralLarge routes large literal payloads through tmux's buffer
+// mechanism (load-buffer + paste-buffer) to avoid the send-keys arg limit.
+// -p on paste-buffer respects bracketed-paste mode if the application has
+// enabled it (Claude Code does), matching what a terminal emulator would do.
+func (c *Client) sendLiteralLarge(windowName, data string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	const bufName = "claudemux_paste"
+	loadCmd := exec.CommandContext(ctx, "tmux", "load-buffer", "-b", bufName, "-")
+	loadCmd.Stdin = strings.NewReader(data)
+	if out, err := loadCmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("load-buffer: %w: %s", err, strings.TrimSpace(string(out)))
+	}
+
+	// -p  uses bracketed paste if the pane has opted in
+	// -d  deletes the buffer after pasting
+	_, err := c.run("paste-buffer", "-p", "-t", c.target(windowName), "-b", bufName, "-d")
 	return err
 }
 

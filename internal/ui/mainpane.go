@@ -337,6 +337,8 @@ func (m MainPaneModel) View() string {
 	vpView := m.viewport.View()
 
 	// Build scrollbar alongside the viewport lines.
+	// Split on exactly visibleLines rows to avoid trailing-newline artefacts
+	// that would make the scrollbar height vary between renders.
 	vpLines := strings.Split(vpView, "\n")
 	visibleLines := m.viewport.Height
 	totalLines := m.totalLines
@@ -344,26 +346,36 @@ func (m MainPaneModel) View() string {
 	showScrollbar := totalLines > visibleLines
 	var thumbStart, thumbEnd int
 	if showScrollbar {
-		thumbSize := visibleLines * visibleLines / totalLines
+		fVis := float64(visibleLines)
+		fTot := float64(totalLines)
+		thumbSize := int(fVis * fVis / fTot)
 		if thumbSize < 1 {
 			thumbSize = 1
 		}
-		scrollable := totalLines - visibleLines
-		thumbStart = m.viewport.YOffset * (visibleLines - thumbSize) / scrollable
+		// When at the bottom, pin the thumb so it doesn't drift as content grows.
+		atBottom := m.viewport.YOffset >= totalLines-visibleLines
+		if atBottom {
+			thumbStart = visibleLines - thumbSize
+		} else {
+			scrollable := fTot - fVis
+			thumbStart = int(float64(m.viewport.YOffset) * float64(visibleLines-thumbSize) / scrollable)
+		}
 		thumbEnd = thumbStart + thumbSize
 	}
 
 	var sb strings.Builder
-	for i, line := range vpLines {
-		sb.WriteString(line)
-		if showScrollbar && i < visibleLines {
+	for i := 0; i < visibleLines; i++ {
+		if i < len(vpLines) {
+			sb.WriteString(vpLines[i])
+		}
+		if showScrollbar {
 			if i >= thumbStart && i < thumbEnd {
 				sb.WriteString(m.thumbStyle.Render("┃"))
 			} else {
 				sb.WriteString(m.trackStyle.Render("│"))
 			}
 		}
-		if i < len(vpLines)-1 {
+		if i < visibleLines-1 {
 			sb.WriteByte('\n')
 		}
 	}
