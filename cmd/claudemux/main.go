@@ -3,6 +3,8 @@ package main
 import (
 	"fmt"
 	"os"
+	"os/signal"
+	"syscall"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/merlijnmacgillavry/claudemux/internal/hooks"
@@ -29,6 +31,20 @@ func main() {
 		tea.WithoutSignalHandler(), // ctrl+c is forwarded to the active Claude window
 	)
 
+	// WithoutSignalHandler prevents Bubble Tea from catching OS signals, which is
+	// intentional so that Ctrl+C (in raw mode: a key event, not SIGINT) forwards
+	// to the active Claude window. However, SIGTERM and SIGHUP (external kill,
+	// terminal close) would otherwise leave the terminal in mouse-reporting mode,
+	// causing stray escape sequences to appear as garbage characters on mouse
+	// movement in the host terminal after claudemux exits.
+	sigs := make(chan os.Signal, 1)
+	signal.Notify(sigs, syscall.SIGTERM, syscall.SIGHUP)
+	go func() {
+		if <-sigs != nil {
+			p.Quit()
+		}
+	}()
+
 	if listener != nil {
 		listener.Start(p)
 		if binary, err := os.Executable(); err == nil {
@@ -37,6 +53,7 @@ func main() {
 	}
 
 	_, runErr := p.Run()
+	signal.Stop(sigs)
 
 	// Always clean up hooks and the socket before exiting, even on error.
 	if listener != nil {
