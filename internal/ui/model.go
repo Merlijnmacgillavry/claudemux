@@ -22,6 +22,12 @@ import (
 
 var ansiEscape = regexp.MustCompile(`\x1b\[[\x30-\x3f]*[\x40-\x7e]|\x1b[^[]`)
 
+// sgrMouseFragment matches the tail of an SGR mouse escape sequence that has
+// been fragmented across TTY reads inside tmux. When the leading \033 is
+// parsed as a standalone KeyEsc, the rest of the sequence arrives as KeyRunes:
+// e.g. "[<65;79;33M" or "[<64;12;8m". These must not be forwarded to Claude.
+var sgrMouseFragment = regexp.MustCompile(`^\[<\d+;\d+;\d+[Mm]$`)
+
 // idlePrompt matches a line where ❯ appears with nothing but whitespace after
 // it — the Claude Code idle prompt. This distinguishes it from the submitted-
 // message line (❯ some text the user typed) which also contains ❯ but is
@@ -741,12 +747,32 @@ func (m *RootModel) handleNormalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m *RootModel) handleInsertKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	// ESC in INSERT mode returns focus to the sidebar, matching the documented
+	// keybinding. It is not forwarded to Claude — use alt+h then esc from
+	// NORMAL mode if you need to send Escape to the active session directly.
+	// This also prevents the leading \033 of a fragmented SGR mouse sequence
+	// from being forwarded when tmux splits the escape code across reads.
+	if msg.String() == "esc" {
+		m.focus = SidebarFocused
+		m.mode = ModeNormal
+		m.statusBar.SetMode(m.mode)
+		return m, nil
+	}
+
 	if m.activeWindowName != "" {
 		// Shift+Enter → send kitty-protocol Shift+Enter sequence to Claude Code.
 		// Requires a terminal that emits \x1b[13;2u (kitty keyboard protocol).
 		if msg.String() == "shift+enter" {
 			m.unchangedTicks = 0
 			return m, sendKeyCmd(m.tmux, m.activeWindowName, "\x1b[13;2u", true)
+		}
+		// Guard: drop key-rune sequences that are the tail of a fragmented SGR
+		// mouse escape sequence. Inside tmux the leading \033 of \033[<Cb;Cx;CyM
+		// can be parsed as a standalone KeyEsc (handled above), leaving the rest
+		// — e.g. "[<65;79;33M" — arriving here as KeyRunes. Forwarding these
+		// would inject raw mouse-protocol bytes into the Claude session.
+		if msg.Type == tea.KeyRunes && sgrMouseFragment.MatchString(string(msg.Runes)) {
+			return m, nil
 		}
 		if evt := tmuxpkg.KeyMsgToTmux(msg); evt != nil {
 			m.unchangedTicks = 0
@@ -1128,10 +1154,16 @@ func (m *RootModel) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
-	// Mouse drag: update selection endpoint.
-	if msg.Action == tea.MouseActionMotion && m.mainPane.selection.Active {
-		row, col := m.screenToContent(msg.X, msg.Y)
-		m.mainPane.UpdateSelection(row, col)
+	// Mouse motion: update the selection endpoint when dragging, then always
+	// return early. Motion events carry no scroll information (that is done via
+	// MouseActionPress with WheelUp/WheelDown), so passing them to the viewport
+	// is unnecessary and can produce stray commands that interact with INSERT
+	// mode forwarding.
+	if msg.Action == tea.MouseActionMotion {
+		if m.mainPane.selection.Active {
+			row, col := m.screenToContent(msg.X, msg.Y)
+			m.mainPane.UpdateSelection(row, col)
+		}
 		return m, nil
 	}
 
