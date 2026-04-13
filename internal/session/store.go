@@ -86,6 +86,12 @@ func (s *Store) SetSkipPermissions(windowName string, skip bool) {
 	s.cfg.Windows[windowName] = meta
 }
 
+// SetUIPrefs updates the UI preferences in the store's config so that saving
+// through GetConfig() never overwrites window metadata with stale data.
+func (s *Store) SetUIPrefs(prefs config.UIPrefs) {
+	s.cfg.UIPrefs = prefs
+}
+
 // GetConfig returns the underlying config (for saving).
 func (s *Store) GetConfig() config.Config {
 	return s.cfg

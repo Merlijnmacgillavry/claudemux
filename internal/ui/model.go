@@ -5,6 +5,7 @@ import (
 	"hash/crc32"
 	"os"
 	"os/exec"
+	"reflect"
 	"regexp"
 	"strconv"
 	"strings"
@@ -244,16 +245,21 @@ func sendKeyCmd(client *tmuxpkg.Client, windowName, key string, literal bool) te
 	}
 }
 
-// detectSessionID waits briefly then looks for a new Claude session file in the
-// project directory. Fires once after window creation to capture the session ID.
+// detectSessionID polls for a new Claude session file in the project directory.
+// It retries every 3 s for up to 30 s because Claude's startup (auth, API
+// handshake, first write) can easily exceed a single 4-second window.
 func detectSessionID(cwd, windowName string, after time.Time) tea.Cmd {
 	return func() tea.Msg {
-		time.Sleep(4 * time.Second)
-		id, err := claudepkg.LatestSessionID(cwd, after)
-		if err != nil {
-			return noopMsg{}
+		const attempts = 10
+		const interval = 3 * time.Second
+		for i := 0; i < attempts; i++ {
+			time.Sleep(interval)
+			id, err := claudepkg.LatestSessionID(cwd, after)
+			if err == nil {
+				return sessionIDDetectedMsg{windowName: windowName, sessionID: id}
+			}
 		}
-		return sessionIDDetectedMsg{windowName: windowName, sessionID: id}
+		return noopMsg{}
 	}
 }
 
@@ -391,6 +397,19 @@ func (m *RootModel) Init() tea.Cmd {
 }
 
 func (m *RootModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	// Bubbletea v1 wraps unrecognised CSI sequences in an unexported
+	// unknownCSISequenceMsg (underlying type []byte). Kitty-capable terminals
+	// send \x1b[13;2u for Shift+Enter; detect it here via reflection so we can
+	// forward it to Claude Code without upgrading to bubbletea v2.
+	if m.mode == ModeInsert && m.activeWindowName != "" {
+		if v := reflect.ValueOf(msg); v.Kind() == reflect.Slice &&
+			v.Type().Elem().Kind() == reflect.Uint8 &&
+			string(v.Bytes()) == "\x1b[13;2u" {
+			m.unchangedTicks = 0
+			return m, sendKeyCmd(m.tmux, m.activeWindowName, "\x1b[13;2u", true)
+		}
+	}
+
 	switch msg := msg.(type) {
 
 	case tea.WindowSizeMsg:
@@ -713,8 +732,10 @@ func (m *RootModel) handleNormalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			newW = 16
 		}
 		m.cfg.UIPrefs.SidebarWidth = newW
+		m.store.SetUIPrefs(m.cfg.UIPrefs)
 		m.resize()
-		_ = m.cfg.Save()
+		cfg := m.store.GetConfig()
+		_ = cfg.Save()
 		return m, nil
 
 	case "]":
@@ -729,8 +750,10 @@ func (m *RootModel) handleNormalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.cfg.UIPrefs.SidebarWidth = newW
+		m.store.SetUIPrefs(m.cfg.UIPrefs)
 		m.resize()
-		_ = m.cfg.Save()
+		cfg := m.store.GetConfig()
+		_ = cfg.Save()
 		return m, nil
 
 	default:
@@ -959,6 +982,7 @@ func (m *RootModel) openWindow(windowName, displayName string, isRunning bool) t
 		delete(m.lastRespawnTime, windowName)
 	}
 
+	var detectCmd tea.Cmd
 	if !isRunning {
 		meta, _ := m.store.GetWindow(windowName)
 		claudeCmd := m.claudeBinary
@@ -968,12 +992,22 @@ func (m *RootModel) openWindow(windowName, displayName string, isRunning bool) t
 		if meta.ClaudeSessionID != "" {
 			claudeCmd += " resume " + meta.ClaudeSessionID
 		}
+		startedAt := time.Now()
 		if err := m.tmux.RespawnPane(windowName, claudeCmd, meta.WorkingDir); err != nil {
 			// Window doesn't exist (e.g. after a system restart or manual stop).
 			// Create it fresh with the same name so the config key remains stable.
 			if _, sessErr := m.tmux.EnsureSession(); sessErr == nil {
 				_ = m.tmux.NewWindow(windowName, claudeCmd, meta.WorkingDir)
 			}
+		}
+		// Immediately mark the sidebar item as running so that a subsequent
+		// Enter press (before discoverWindows refreshes the list) does not
+		// trigger another respawn.
+		m.sidebar.SetRunning(windowName, true)
+		// If no session ID was stored this is a brand-new Claude session; detect
+		// and persist the ID so future restarts can resume it.
+		if meta.ClaudeSessionID == "" && meta.WorkingDir != "" {
+			detectCmd = detectSessionID(meta.WorkingDir, windowName, startedAt)
 		}
 	}
 
@@ -1004,6 +1038,7 @@ func (m *RootModel) openWindow(windowName, displayName string, isRunning bool) t
 	return tea.Batch(
 		pollCapture(m.tmux, windowName, paneH, m.tickGeneration),
 		fetchGitBranch(windowName, meta.WorkingDir),
+		detectCmd,
 	)
 }
 

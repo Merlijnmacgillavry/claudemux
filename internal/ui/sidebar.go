@@ -125,6 +125,22 @@ func (s *SidebarModel) SetSessions(sessions []SessionItem) {
 	s.list.SetItems(items)
 }
 
+// SetRunning updates the IsRunning flag for the given window ID.
+// Called after a respawn so that subsequent Enter presses do not trigger
+// another respawn before discoverWindows has a chance to refresh the list.
+func (s *SidebarModel) SetRunning(windowID string, running bool) {
+	items := s.list.Items()
+	for i, item := range items {
+		sess, ok := item.(SessionItem)
+		if !ok || sess.ID != windowID {
+			continue
+		}
+		sess.IsRunning = running
+		s.list.SetItem(i, sess)
+		break
+	}
+}
+
 // SetWaiting updates the WaitsForInput flag for the given window ID.
 func (s *SidebarModel) SetWaiting(windowID string, waiting bool) {
 	items := s.list.Items()
