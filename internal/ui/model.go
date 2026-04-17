@@ -5,6 +5,7 @@ import (
 	"hash/crc32"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"reflect"
 	"regexp"
 	"strconv"
@@ -40,8 +41,19 @@ var idlePrompt = regexp.MustCompile(`❯\s*$`)
 // We match only lines where ❯ is at the end of the line with no trailing
 // text, so that a just-submitted message (❯ fix the bug…) is not a false
 // positive regardless of how many lines of response Claude has written.
+//
+// Only the tail of the content is examined to avoid running an O(n) regex
+// over the full 512 KB buffer on every poll tick.
 func isWaitingForInput(content string) bool {
-	clean := ansiEscape.ReplaceAllString(content, "")
+	const tailBytes = 500
+	tail := content
+	if len(tail) > tailBytes {
+		tail = tail[len(tail)-tailBytes:]
+		if idx := strings.IndexByte(tail, '\n'); idx >= 0 {
+			tail = tail[idx+1:]
+		}
+	}
+	clean := ansiEscape.ReplaceAllString(tail, "")
 	lines := strings.Split(strings.TrimRight(clean, "\n"), "\n")
 	start := len(lines) - 5
 	if start < 0 {
@@ -247,6 +259,19 @@ func pollDeadCheck(client *tmuxpkg.Client, windowName string, gen uint64) tea.Cm
 func sendKeyCmd(client *tmuxpkg.Client, windowName, key string, literal bool) tea.Cmd {
 	return func() tea.Msg {
 		err := client.SendKey(windowName, key, literal)
+		return sendKeyDoneMsg{err: err}
+	}
+}
+
+// sendLineCmd sends a full line of text to tmux followed by Enter, as a single
+// async command. Used for injecting shell commands (e.g. "cd /path") into a
+// running session.
+func sendLineCmd(client *tmuxpkg.Client, windowName, line string) tea.Cmd {
+	return func() tea.Msg {
+		if err := client.SendKey(windowName, line, true); err != nil {
+			return sendKeyDoneMsg{err: err}
+		}
+		err := client.SendKey(windowName, "Enter", false)
 		return sendKeyDoneMsg{err: err}
 	}
 }
@@ -554,8 +579,7 @@ func (m *RootModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case sessionIDDetectedMsg:
 		m.store.SetClaudeSessionID(msg.windowName, msg.sessionID)
-		cfg := m.store.GetConfig()
-		_ = cfg.Save()
+		m.saveConfig()
 
 	case hooks.HookNotificationMsg:
 		// Instant notification from a Claude Code hook: mark the window as
@@ -592,9 +616,14 @@ func (m *RootModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m *RootModel) sessions(infos []session.SessionInfo) {
 	items := make([]SessionItem, len(infos))
 	for i, s := range infos {
+		preview := ""
+		if s.Project != "" {
+			preview = filepath.Base(s.Project)
+		}
 		items[i] = SessionItem{
 			ID:            s.ID,
 			Name:          s.Name,
+			Preview:       preview,
 			LastActive:    s.LastActive,
 			IsRunning:     s.Status == session.StatusRunning,
 			WorkingDir:    s.Project,
@@ -616,6 +645,19 @@ func (m *RootModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, sendKeyCmd(m.tmux, m.activeWindowName, "C-c", false)
 		}
 		return m, tea.Quit
+	}
+
+	// Search intercepts keys when active (from any non-dialog mode).
+	if m.mainPane.IsSearching() && m.mode != ModeDialog {
+		return m.handleSearchKey(msg)
+	}
+
+	// ctrl+f: open inline search in the main pane (any non-dialog mode).
+	if m.mode != ModeDialog && msg.String() == "ctrl+f" && m.mainPane.hasSession {
+		m.mainPane.StartSearch()
+		m.focus = MainFocused
+		m.statusBar.SetSearchActive(true)
+		return m, nil
 	}
 
 	// alt+h/l: universal pane navigation (works from any non-dialog mode)
@@ -646,6 +688,25 @@ func (m *RootModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 }
 
+func (m *RootModel) handleSearchKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "esc":
+		m.mainPane.StopSearch()
+		m.statusBar.SetSearchActive(false)
+		m.lastCaptureHash = 0 // force viewport refresh on next tick
+		return m, nil
+	case "enter", "n":
+		m.mainPane.SearchNext()
+		return m, nil
+	case "N":
+		m.mainPane.SearchPrev()
+		return m, nil
+	default:
+		cmd := m.mainPane.UpdateSearchInput(msg)
+		return m, cmd
+	}
+}
+
 func (m *RootModel) handleNormalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	m.statusBar.ClearError()
 
@@ -658,6 +719,27 @@ func (m *RootModel) handleNormalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 
 	switch msg.String() {
+	case "1", "2", "3", "4", "5", "6", "7", "8", "9":
+		idx, _ := strconv.Atoi(msg.String())
+		items := m.sidebar.list.Items()
+		if idx-1 < len(items) {
+			m.sidebar.SelectIndex(idx - 1)
+			sel := m.sidebar.SelectedSession()
+			if sel != nil {
+				return m, m.openWindow(sel.ID, sel.Name, sel.IsRunning)
+			}
+		}
+		return m, nil
+
+	case "e":
+		if m.mainPane.hasSession {
+			text := ansiEscape.ReplaceAllString(m.mainPane.content, "")
+			if err := clipboard.WriteAll(text); err != nil {
+				m.statusBar.SetError("export: " + err.Error())
+			}
+		}
+		return m, nil
+
 	case "q":
 		return m, tea.Quit
 
@@ -726,7 +808,7 @@ func (m *RootModel) handleNormalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			if scrollback == 0 {
 				scrollback = config.DefaultScrollbackLines
 			}
-			m.dialog.ShowSettings(sel.ID, sel.Name, scrollback, meta.SkipPermissions)
+			m.dialog.ShowSettings(sel.ID, sel.Name, scrollback, meta.SkipPermissions, meta.WorkingDir)
 			m.mode = ModeDialog
 			m.statusBar.SetMode(m.mode)
 		}
@@ -740,8 +822,7 @@ func (m *RootModel) handleNormalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.cfg.UIPrefs.SidebarWidth = newW
 		m.store.SetUIPrefs(m.cfg.UIPrefs)
 		m.resize()
-		cfg := m.store.GetConfig()
-		_ = cfg.Save()
+		m.saveConfig()
 		return m, nil
 
 	case "]":
@@ -758,8 +839,7 @@ func (m *RootModel) handleNormalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.cfg.UIPrefs.SidebarWidth = newW
 		m.store.SetUIPrefs(m.cfg.UIPrefs)
 		m.resize()
-		cfg := m.store.GetConfig()
-		_ = cfg.Save()
+		m.saveConfig()
 		return m, nil
 
 	default:
@@ -847,15 +927,33 @@ func (m *RootModel) confirmDialog() (tea.Model, tea.Cmd) {
 		if cwd == "" {
 			cwd, _ = os.Getwd()
 		}
-		initCmd := m.dialog.ShowDirPicker(name, cwd)
+		initCmd := m.dialog.ShowDirPicker(name, cwd, m.store.GetRecentDirs())
 		// stay in ModeDialog
 		return m, initCmd
 
 	case DialogDirPicker:
 		cwd := m.dialog.PickerDir()
 		name := m.dialog.PendingName()
+
+		if windowID := m.dialog.DirChangeForWindow(); windowID != "" {
+			// Changing the working directory of an existing session.
+			m.store.SetWindow(windowID, "", cwd)
+			m.store.AddRecentDir(cwd)
+			m.saveConfig()
+			m.dialog.Close()
+			m.mode = ModeNormal
+			m.statusBar.SetMode(m.mode)
+			// If this is the active window, send a cd command to the live pane.
+			cmds := []tea.Cmd{discoverWindows(m.tmux, m.store)}
+			if windowID == m.activeWindowName {
+				cmds = append(cmds, sendLineCmd(m.tmux, windowID, "cd "+shellQuote(cwd)))
+			}
+			return m, tea.Batch(cmds...)
+		}
+
 		skipPerms := m.dialog.PendingSkipPermissions()
 		scrollback := m.dialog.PendingScrollback()
+		m.store.AddRecentDir(cwd)
 		m.dialog.Close()
 		m.mode = ModeNormal
 		m.statusBar.SetMode(m.mode)
@@ -866,8 +964,7 @@ func (m *RootModel) confirmDialog() (tea.Model, tea.Cmd) {
 		name := m.dialog.InputValue()
 		if name != "" && id != "" {
 			m.store.SetWindow(id, name, "")
-			cfg := m.store.GetConfig()
-			_ = cfg.Save()
+			m.saveConfig()
 			if id == m.activeWindowName {
 				m.mainPane.SetSession(name)
 				m.statusBar.SetSessionName(name)
@@ -883,8 +980,7 @@ func (m *RootModel) confirmDialog() (tea.Model, tea.Cmd) {
 		if id != "" {
 			_ = m.tmux.KillWindow(id)
 			m.store.RemoveWindow(id)
-			cfg := m.store.GetConfig()
-			_ = cfg.Save()
+			m.saveConfig()
 			delete(m.waitingWindows, id)
 			delete(m.respawnCount, id)
 			delete(m.lastRespawnTime, id)
@@ -909,6 +1005,16 @@ func (m *RootModel) confirmDialog() (tea.Model, tea.Cmd) {
 	case DialogSettings:
 		id := m.dialog.SessionID()
 		name := m.dialog.sessionName
+		if id != "" && m.dialog.settingsField == 2 {
+			// Field 2 = change working directory — open dir picker for this session.
+			meta, _ := m.store.GetWindow(id)
+			startDir := meta.WorkingDir
+			if startDir == "" {
+				startDir, _ = os.Getwd()
+			}
+			initCmd := m.dialog.ShowDirPickerForChange(id, name, startDir, m.store.GetRecentDirs())
+			return m, initCmd
+		}
 		if id != "" {
 			lines, err := strconv.Atoi(strings.TrimSpace(m.dialog.InputValue()))
 			if err != nil || lines < 100 {
@@ -922,8 +1028,7 @@ func (m *RootModel) confirmDialog() (tea.Model, tea.Cmd) {
 			newSkip := m.dialog.SettingsSkipPermissions()
 			m.store.SetScrollback(id, lines)
 			m.store.SetSkipPermissions(id, newSkip)
-			cfg := m.store.GetConfig()
-			_ = cfg.Save()
+			m.saveConfig()
 			// Offer restart only when the permissions flag changed and the session is live.
 			if newSkip != oldSkip {
 				isActive := id == m.activeWindowName
@@ -1077,6 +1182,15 @@ func (m *RootModel) paneHeight() int {
 		}
 	}
 	return config.DefaultScrollbackLines
+}
+
+// saveConfig persists the current config and surfaces any write error in the
+// status bar. It is a convenience wrapper around the scattered cfg.Save() calls.
+func (m *RootModel) saveConfig() {
+	cfg := m.store.GetConfig()
+	if err := cfg.Save(); err != nil {
+		m.statusBar.SetError("config save: " + err.Error())
+	}
 }
 
 func (m *RootModel) resize() {

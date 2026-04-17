@@ -25,7 +25,11 @@ type Client struct{}
 func New() *Client { return &Client{} }
 
 func (c *Client) run(args ...string) (string, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	return c.runWithTimeout(2*time.Second, args...)
+}
+
+func (c *Client) runWithTimeout(d time.Duration, args ...string) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), d)
 	defer cancel()
 	out, err := exec.CommandContext(ctx, "tmux", args...).Output()
 	if err != nil {
@@ -167,6 +171,8 @@ const sendKeysArgLimit = 1000
 // SendKey sends a keystroke to the named window.
 // If literal is true, the key is sent as raw characters (-l flag).
 // If literal is false, key is a tmux key name such as "Enter" or "C-c".
+// Uses a short timeout — send-keys is a fire-and-forget operation and
+// should complete in single-digit milliseconds on any healthy system.
 func (c *Client) SendKey(windowName, key string, literal bool) error {
 	if literal && len(key) > sendKeysArgLimit {
 		return c.sendLiteralLarge(windowName, key)
@@ -177,7 +183,7 @@ func (c *Client) SendKey(windowName, key string, literal bool) error {
 	} else {
 		args = append(args, key)
 	}
-	_, err := c.run(args...)
+	_, err := c.runWithTimeout(500*time.Millisecond, args...)
 	return err
 }
 

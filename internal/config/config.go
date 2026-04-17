@@ -34,6 +34,7 @@ type Config struct {
 	Windows           map[string]WindowMeta `json:"windows,omitempty"`
 	UIPrefs           UIPrefs               `json:"uiPrefs,omitempty"`
 	DefaultWorkingDir string                `json:"defaultWorkingDir,omitempty"`
+	RecentDirs        []string              `json:"recentDirs,omitempty"`
 }
 
 // DefaultConfig returns a Config with sensible defaults.

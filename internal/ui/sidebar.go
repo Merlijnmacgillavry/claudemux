@@ -52,7 +52,7 @@ func (d SessionDelegate) Render(w io.Writer, m list.Model, index int, item list.
 
 	name := s.Name
 	if s.WaitsForInput {
-		name = lipgloss.NewStyle().Foreground(lipgloss.Color("#FBBF24")).Render("! ") + name
+		name = lipgloss.NewStyle().Foreground(lipgloss.Color("#FBBF24")).Render("◎ ") + name
 	}
 	preview := truncate(s.Preview, 50)
 	timeStr := relativeTime(s.LastActive)

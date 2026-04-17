@@ -26,22 +26,29 @@ const (
 	DialogConfirmRestart
 )
 
-// dirPickState is a lightweight searchable directory picker.
+// dirEntry is one item in the dir picker's combined visible list.
+type dirEntry struct {
+	label    string // display label (may be ~ abbreviated)
+	fullPath string // non-empty for recent dirs; empty means it is a subdirectory name
+}
+
+// dirPickState is a searchable directory picker with recent-dirs support.
 type dirPickState struct {
 	cwd        string
-	all        []string // all visible subdirs in cwd
-	filtered   []string // filtered by query
+	recents    []string    // full absolute paths of recently used directories
+	all        []string    // all visible subdirectory names in cwd
+	visible    []dirEntry  // combined recents + subdirs, after filtering
 	cursor     int
 	filter     textinput.Model
 	showHidden bool
 }
 
-func newDirPickState(startDir string) dirPickState {
+func newDirPickState(startDir string, recents []string) dirPickState {
 	ti := textinput.New()
 	ti.Placeholder = "filter..."
 	ti.Prompt = "> "
 	ti.Focus()
-	d := dirPickState{cwd: startDir, filter: ti}
+	d := dirPickState{cwd: startDir, recents: recents, filter: ti}
 	d.loadEntries()
 	return d
 }
@@ -50,8 +57,7 @@ func (d *dirPickState) loadEntries() {
 	entries, err := os.ReadDir(d.cwd)
 	if err != nil {
 		d.all = nil
-		d.filtered = nil
-		d.cursor = 0
+		d.applyFilter()
 		return
 	}
 	var dirs []string
@@ -66,31 +72,52 @@ func (d *dirPickState) loadEntries() {
 
 func (d *dirPickState) applyFilter() {
 	q := strings.ToLower(d.filter.Value())
-	if q == "" {
-		cp := make([]string, len(d.all))
-		copy(cp, d.all)
-		d.filtered = cp
-	} else {
-		var out []string
-		for _, name := range d.all {
-			if strings.Contains(strings.ToLower(name), q) {
-				out = append(out, name)
-			}
+	home, _ := os.UserHomeDir()
+
+	abbrev := func(p string) string {
+		if home != "" && strings.HasPrefix(p, home) {
+			return "~" + p[len(home):]
 		}
-		d.filtered = out
+		return p
 	}
-	if len(d.filtered) == 0 {
+
+	var items []dirEntry
+
+	// Recents first (match against their abbreviated label).
+	for _, r := range d.recents {
+		label := abbrev(r)
+		if q == "" || strings.Contains(strings.ToLower(label), q) {
+			items = append(items, dirEntry{label: label, fullPath: r})
+		}
+	}
+
+	// Subdirectory names.
+	for _, name := range d.all {
+		if q == "" || strings.Contains(strings.ToLower(name), q) {
+			items = append(items, dirEntry{label: name})
+		}
+	}
+
+	d.visible = items
+	if len(d.visible) == 0 {
 		d.cursor = 0
-	} else if d.cursor >= len(d.filtered) {
-		d.cursor = len(d.filtered) - 1
+	} else if d.cursor >= len(d.visible) {
+		d.cursor = len(d.visible) - 1
 	}
 }
 
+// descend navigates into the selected item.
+// For a recent dir it jumps to that full path; for a subdirectory it descends normally.
 func (d *dirPickState) descend() {
-	if len(d.filtered) == 0 || d.cursor >= len(d.filtered) {
+	if len(d.visible) == 0 || d.cursor >= len(d.visible) {
 		return
 	}
-	d.cwd = filepath.Join(d.cwd, d.filtered[d.cursor])
+	item := d.visible[d.cursor]
+	if item.fullPath != "" {
+		d.cwd = item.fullPath
+	} else {
+		d.cwd = filepath.Join(d.cwd, item.label)
+	}
 	d.filter.SetValue("")
 	d.cursor = 0
 	d.loadEntries()
@@ -105,6 +132,25 @@ func (d *dirPickState) ascend() {
 	d.filter.SetValue("")
 	d.cursor = 0
 	d.loadEntries()
+}
+
+// cursorOnRecent reports whether the cursor is currently on a recent-dir entry.
+func (d *dirPickState) cursorOnRecent() bool {
+	if d.cursor >= len(d.visible) {
+		return false
+	}
+	return d.visible[d.cursor].fullPath != ""
+}
+
+// selectedPath returns the effective directory the user has chosen.
+// When the cursor is on a recent-dir entry, that entry's full path is returned
+// so a single Enter press selects it without requiring a separate descend step.
+// Otherwise the current cwd is returned.
+func (d *dirPickState) selectedPath() string {
+	if d.cursorOnRecent() {
+		return d.visible[d.cursor].fullPath
+	}
+	return d.cwd
 }
 
 func (d dirPickState) Update(msg tea.Msg) (dirPickState, tea.Cmd) {
@@ -122,7 +168,7 @@ func (d dirPickState) Update(msg tea.Msg) (dirPickState, tea.Cmd) {
 			}
 			return d, nil
 		case tea.KeyDown:
-			if d.cursor < len(d.filtered)-1 {
+			if d.cursor < len(d.visible)-1 {
 				d.cursor++
 			}
 			return d, nil
@@ -135,7 +181,6 @@ func (d dirPickState) Update(msg tea.Msg) (dirPickState, tea.Cmd) {
 				return d, nil
 			}
 		}
-		// Everything else (including backspace with text) goes to the filter input.
 		prev := d.filter.Value()
 		var cmd tea.Cmd
 		d.filter, cmd = d.filter.Update(msg)
@@ -151,30 +196,38 @@ const dirPickerVisibleItems = 12
 
 func (d dirPickState) View() string {
 	var sb strings.Builder
-
 	sb.WriteString(d.filter.View())
 	sb.WriteString("\n")
+
+	if len(d.visible) == 0 {
+		sb.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("#6B7280")).Render("  (no matches)"))
+		return strings.TrimRight(sb.String(), "\n")
+	}
 
 	start := 0
 	if d.cursor >= dirPickerVisibleItems {
 		start = d.cursor - dirPickerVisibleItems + 1
 	}
 
-	shown := 0
 	sel := lipgloss.NewStyle().Foreground(lipgloss.Color("#E9D5FF")).Bold(true)
-	for i := start; i < len(d.filtered) && shown < dirPickerVisibleItems; i++ {
+	recentStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#FBBF24"))
+
+	shown := 0
+	for i := start; i < len(d.visible) && shown < dirPickerVisibleItems; i++ {
+		item := d.visible[i]
 		if i == d.cursor {
-			sb.WriteString(sel.Render("▶ " + d.filtered[i]))
+			if item.fullPath != "" {
+				sb.WriteString(sel.Render("▶ ★ " + item.label))
+			} else {
+				sb.WriteString(sel.Render("▶ " + item.label))
+			}
+		} else if item.fullPath != "" {
+			sb.WriteString(recentStyle.Render("  ★ " + item.label))
 		} else {
-			sb.WriteString("  " + d.filtered[i])
+			sb.WriteString("    " + item.label)
 		}
 		sb.WriteString("\n")
 		shown++
-	}
-
-	if len(d.filtered) == 0 {
-		sb.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("#6B7280")).Render("  (no matches)"))
-		sb.WriteString("\n")
 	}
 
 	return strings.TrimRight(sb.String(), "\n")
@@ -191,9 +244,10 @@ type DialogModel struct {
 	sessionName string
 
 	// dir picker state
-	dp              dirPickState
-	pendingName     string // session name saved during dir picking
-	pendingSkipPerms bool   // --dangerously-skip-permissions flag carried from new-session dialog
+	dp                  dirPickState
+	pendingName         string // session name saved during dir picking
+	pendingSkipPerms    bool   // --dangerously-skip-permissions flag carried from new-session dialog
+	dirChangeForWindow  string // when set, dir picker is changing an existing session's working dir
 
 	// new session options
 	skipPermissions bool
@@ -201,7 +255,8 @@ type DialogModel struct {
 	newSessionField int             // 0=name, 1=scrollback, 2=permissions
 
 	// settings dialog options
-	settingsField int // 0=scrollback, 1=permissions
+	settingsField  int    // 0=scrollback, 1=permissions, 2=working dir
+	workingDir     string // displayed in settings field 2
 }
 
 func NewDialogModel(styles Styles) DialogModel {
@@ -231,12 +286,24 @@ func (d *DialogModel) ShowNewSession() {
 	d.newSessionField = 0
 }
 
-func (d *DialogModel) ShowDirPicker(name, startDir string) tea.Cmd {
+func (d *DialogModel) ShowDirPicker(name, startDir string, recents []string) tea.Cmd {
 	d.pendingName = name
 	d.pendingSkipPerms = d.skipPermissions
+	d.dirChangeForWindow = ""
 	d.dialogType = DialogDirPicker
 	d.title = "Choose Working Directory"
-	d.dp = newDirPickState(startDir)
+	d.dp = newDirPickState(startDir, recents)
+	return nil
+}
+
+// ShowDirPickerForChange opens the dir picker in "change working directory" mode
+// for an existing session identified by windowID.
+func (d *DialogModel) ShowDirPickerForChange(windowID, sessionName, startDir string, recents []string) tea.Cmd {
+	d.dirChangeForWindow = windowID
+	d.pendingName = sessionName
+	d.dialogType = DialogDirPicker
+	d.title = "Change Working Directory"
+	d.dp = newDirPickState(startDir, recents)
 	return nil
 }
 
@@ -274,11 +341,12 @@ func (d *DialogModel) ShowConfirmRestart(id, name string) {
 	d.input.Blur()
 }
 
-func (d *DialogModel) ShowSettings(id, name string, scrollback int, skipPerms bool) {
+func (d *DialogModel) ShowSettings(id, name string, scrollback int, skipPerms bool, workingDir string) {
 	d.dialogType = DialogSettings
 	d.title = "Session Settings"
 	d.sessionID = id
 	d.sessionName = name
+	d.workingDir = workingDir
 	d.input.Placeholder = "Scrollback lines (default 2000)"
 	d.input.SetValue(strconv.Itoa(scrollback))
 	d.input.Focus()
@@ -293,6 +361,7 @@ func (d DialogModel) SettingsSkipPermissions() bool {
 
 func (d *DialogModel) Close() {
 	d.dialogType = DialogNone
+	d.dirChangeForWindow = ""
 	d.input.Blur()
 }
 
@@ -322,9 +391,17 @@ func (d DialogModel) PendingSkipPermissions() bool {
 	return d.pendingSkipPerms
 }
 
-// PickerDir returns the currently selected directory in the dir picker.
+// PickerDir returns the directory the user has selected in the dir picker.
+// When the cursor rests on a recent-dir entry, that entry's full path is returned
+// directly (no descend required); otherwise the current cwd is returned.
 func (d DialogModel) PickerDir() string {
-	return d.dp.cwd
+	return d.dp.selectedPath()
+}
+
+// DirChangeForWindow returns the window ID this dir-picker session is changing,
+// or "" when it is for a new session.
+func (d DialogModel) DirChangeForWindow() string {
+	return d.dirChangeForWindow
 }
 
 // PendingScrollback returns the parsed scrollback line count from the new-session
@@ -370,11 +447,11 @@ func (d DialogModel) Update(msg tea.Msg) (DialogModel, tea.Cmd) {
 		}
 	case DialogSettings:
 		if k, ok := msg.(tea.KeyMsg); ok && k.Type == tea.KeyTab {
-			d.settingsField = (d.settingsField + 1) % 2
+			d.settingsField = (d.settingsField + 1) % 3
 			switch d.settingsField {
 			case 0:
 				d.input.Focus()
-			case 1:
+			case 1, 2:
 				d.input.Blur()
 			}
 			return d, nil
@@ -386,6 +463,8 @@ func (d DialogModel) Update(msg tea.Msg) (DialogModel, tea.Cmd) {
 			if k, ok := msg.(tea.KeyMsg); ok && k.String() == " " {
 				d.skipPermissions = !d.skipPermissions
 			}
+		case 2:
+			// Enter on field 2 is intercepted by confirmDialog in model.go.
 		}
 	default:
 		d.input, cmd = d.input.Update(msg)
@@ -397,12 +476,12 @@ func (d DialogModel) View(screenWidth, screenHeight int) string {
 	var body string
 
 	hint := lipgloss.NewStyle().Foreground(lipgloss.Color("#6B7280"))
+	focused := lipgloss.NewStyle().Foreground(lipgloss.Color("#E9D5FF")).Bold(true)
 
 	switch d.dialogType {
 	case DialogNewSession:
 		var checkbox string
 		if d.newSessionField == 2 {
-			// field is focused: always show highlight so the user can see where they are
 			checkmark := "[ ]"
 			if d.skipPermissions {
 				checkmark = "[✓]"
@@ -489,6 +568,20 @@ func (d DialogModel) View(screenWidth, screenHeight int) string {
 		} else {
 			checkbox = "[ ] --dangerously-skip-permissions"
 		}
+
+		dirLabel := d.workingDir
+		if dirLabel == "" {
+			dirLabel = "(not set)"
+		} else if home, err := os.UserHomeDir(); err == nil && strings.HasPrefix(dirLabel, home) {
+			dirLabel = "~" + dirLabel[len(home):]
+		}
+		var dirRow string
+		if d.settingsField == 2 {
+			dirRow = focused.Render("▶ "+dirLabel) + hint.Render("  (enter to change)")
+		} else {
+			dirRow = "  " + dirLabel
+		}
+
 		body = lipgloss.JoinVertical(lipgloss.Left,
 			d.styles.DialogTitle.Render(d.title),
 			"",
@@ -499,7 +592,10 @@ func (d DialogModel) View(screenWidth, screenHeight int) string {
 			"",
 			checkbox,
 			"",
-			hint.Render("tab to cycle fields  space to toggle  enter to confirm  esc to cancel"),
+			"Working directory:",
+			dirRow,
+			"",
+			hint.Render("tab to cycle fields  space to toggle  enter to confirm / change dir  esc to cancel"),
 		)
 
 	case DialogHelp:
@@ -509,12 +605,14 @@ func (d DialogModel) View(screenWidth, screenHeight int) string {
 			"",
 			accent.Render("Sidebar (NORMAL mode)"),
 			"  j/k        navigate sessions",
+			"  1-9        jump to session by position",
 			"  enter      open/resume session",
 			"  n          new session",
 			"  r          rename session",
-			"  s          session settings",
+			"  s          session settings (scrollback, dir, permissions)",
 			"  x          stop session (keep metadata)",
 			"  d          delete session",
+			"  e          export session to clipboard",
 			"  /          search sessions",
 			"  [/]        resize sidebar",
 			"  ?          toggle this help",
@@ -526,7 +624,14 @@ func (d DialogModel) View(screenWidth, screenHeight int) string {
 			"  click      switch pane / open session",
 			"",
 			accent.Render("Main pane (INSERT mode)"),
-			"  (all keys go to Claude)",
+			"  ctrl+f     search session output",
+			"  (all other keys go to Claude)",
+			"",
+			accent.Render("Search"),
+			"  type       filter matches",
+			"  enter / n  next match",
+			"  N          previous match",
+			"  esc        close search",
 			"",
 			hint.Render("press any key to close"),
 		)

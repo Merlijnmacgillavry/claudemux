@@ -32,6 +32,7 @@ type StatusBarModel struct {
 	mode         Mode
 	sessionName  string
 	errorMessage string
+	searchActive bool
 	styles       Styles
 }
 
@@ -59,6 +60,10 @@ func (s *StatusBarModel) ClearError() {
 	s.errorMessage = ""
 }
 
+func (s *StatusBarModel) SetSearchActive(active bool) {
+	s.searchActive = active
+}
+
 func (s StatusBarModel) View() string {
 	mode := s.styles.StatusMode.Render(s.mode.String())
 
@@ -77,13 +82,17 @@ func (s StatusBarModel) View() string {
 	}
 
 	var hints string
-	switch s.mode {
-	case ModeNormal:
-		hints = "j/k: navigate  enter: open  n: new  r: rename  s: settings  d: delete  /: search  [/]: resize  ?: help  q: quit"
-	case ModeInsert:
-		hints = "shift+enter: newline  drag: copy  (all other keys sent to Claude)"
-	case ModeDialog:
-		hints = "enter: confirm  esc: cancel"
+	if s.searchActive {
+		hints = "type: search  enter/n: next  N: prev  esc: close"
+	} else {
+		switch s.mode {
+		case ModeNormal:
+			hints = "j/k: navigate  1-9: jump  enter: open  n: new  r: rename  s: settings  d: delete  e: export  ctrl+f: search  [/]: resize  ?: help  q: quit"
+		case ModeInsert:
+			hints = "shift+enter: newline  drag: copy  ctrl+f: search  (all other keys sent to Claude)"
+		case ModeDialog:
+			hints = "enter: confirm  esc: cancel"
+		}
 	}
 
 	hintsStr := s.styles.StatusHints.Render(hints)
