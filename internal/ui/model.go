@@ -215,6 +215,23 @@ func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
 }
 
+// defaultStartDir returns the best starting directory for the dir picker.
+// When preferred is set it wins; otherwise we use the process cwd unless it is
+// "/" (common when launched from a GUI on macOS), in which case we fall back to
+// the user's home directory.
+func defaultStartDir(preferred string) string {
+	if preferred != "" {
+		return preferred
+	}
+	if cwd, err := os.Getwd(); err == nil && cwd != "/" {
+		return cwd
+	}
+	if home, err := os.UserHomeDir(); err == nil {
+		return home
+	}
+	return "/"
+}
+
 func runShell(cmd string) (string, error) {
 	out, err := exec.Command("sh", "-c", cmd).Output()
 	return string(out), err
@@ -332,7 +349,6 @@ func (m *RootModel) captureDepth() int {
 	}
 	return m.paneHeight()
 }
-
 
 func createWindow(client *tmuxpkg.Client, store *session.Store, claudeBinary, displayName, cwd string, skipPerms bool, scrollback int) tea.Cmd {
 	startedAt := time.Now()
@@ -923,10 +939,7 @@ func (m *RootModel) confirmDialog() (tea.Model, tea.Cmd) {
 			m.statusBar.SetError("claude binary not found in PATH")
 			return m, nil
 		}
-		cwd := m.cfg.DefaultWorkingDir
-		if cwd == "" {
-			cwd, _ = os.Getwd()
-		}
+		cwd := defaultStartDir(m.cfg.DefaultWorkingDir)
 		initCmd := m.dialog.ShowDirPicker(name, cwd, m.store.GetRecentDirs())
 		// stay in ModeDialog
 		return m, initCmd
@@ -1008,10 +1021,7 @@ func (m *RootModel) confirmDialog() (tea.Model, tea.Cmd) {
 		if id != "" && m.dialog.settingsField == 2 {
 			// Field 2 = change working directory — open dir picker for this session.
 			meta, _ := m.store.GetWindow(id)
-			startDir := meta.WorkingDir
-			if startDir == "" {
-				startDir, _ = os.Getwd()
-			}
+			startDir := defaultStartDir(meta.WorkingDir)
 			initCmd := m.dialog.ShowDirPickerForChange(id, name, startDir, m.store.GetRecentDirs())
 			return m, initCmd
 		}
@@ -1253,12 +1263,13 @@ func (m *RootModel) sidebarWidth() int {
 // coordinate within the main pane's viewport content buffer.
 //
 // Layout (0-indexed screen rows/cols):
-//   col 0..sidebarW-1        : sidebar (border inclusive)
-//   col sidebarW             : main pane left border
-//   col sidebarW+1..          : main pane content
-//   row 0                    : top border of both panes
-//   row 1                    : main pane title bar
-//   row 2..height-2           : viewport content rows
+//
+//	col 0..sidebarW-1        : sidebar (border inclusive)
+//	col sidebarW             : main pane left border
+//	col sidebarW+1..          : main pane content
+//	row 0                    : top border of both panes
+//	row 1                    : main pane title bar
+//	row 2..height-2           : viewport content rows
 func (m *RootModel) screenToContent(screenX, screenY int) (row, col int) {
 	sidebarW := m.sidebarWidth()
 	col = screenX - sidebarW - 1
@@ -1390,4 +1401,3 @@ func (m *RootModel) View() string {
 
 	return base
 }
-

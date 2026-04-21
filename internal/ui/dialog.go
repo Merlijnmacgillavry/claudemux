@@ -29,15 +29,15 @@ const (
 // dirEntry is one item in the dir picker's combined visible list.
 type dirEntry struct {
 	label    string // display label (may be ~ abbreviated)
-	fullPath string // non-empty for recent dirs; empty means it is a subdirectory name
+	fullPath string // absolute path; set for both recents and subdirs
 }
 
 // dirPickState is a searchable directory picker with recent-dirs support.
 type dirPickState struct {
 	cwd        string
-	recents    []string    // full absolute paths of recently used directories
-	all        []string    // all visible subdirectory names in cwd
-	visible    []dirEntry  // combined recents + subdirs, after filtering
+	recents    []string   // full absolute paths of recently used directories
+	all        []string   // all visible subdirectory names in cwd
+	visible    []dirEntry // combined recents + subdirs, after filtering
 	cursor     int
 	filter     textinput.Model
 	showHidden bool
@@ -94,7 +94,7 @@ func (d *dirPickState) applyFilter() {
 	// Subdirectory names.
 	for _, name := range d.all {
 		if q == "" || strings.Contains(strings.ToLower(name), q) {
-			items = append(items, dirEntry{label: name})
+			items = append(items, dirEntry{label: name, fullPath: filepath.Join(d.cwd, name)})
 		}
 	}
 
@@ -143,11 +143,11 @@ func (d *dirPickState) cursorOnRecent() bool {
 }
 
 // selectedPath returns the effective directory the user has chosen.
-// When the cursor is on a recent-dir entry, that entry's full path is returned
-// so a single Enter press selects it without requiring a separate descend step.
-// Otherwise the current cwd is returned.
+// Returns the fullPath of the currently highlighted entry, which for subdirs is
+// filepath.Join(cwd, name) and for recents is the absolute path. Falls back to
+// d.cwd only when the list is empty (e.g. empty dir or no filter match).
 func (d *dirPickState) selectedPath() string {
-	if d.cursorOnRecent() {
+	if len(d.visible) > 0 && d.cursor < len(d.visible) {
 		return d.visible[d.cursor].fullPath
 	}
 	return d.cwd
@@ -244,10 +244,10 @@ type DialogModel struct {
 	sessionName string
 
 	// dir picker state
-	dp                  dirPickState
-	pendingName         string // session name saved during dir picking
-	pendingSkipPerms    bool   // --dangerously-skip-permissions flag carried from new-session dialog
-	dirChangeForWindow  string // when set, dir picker is changing an existing session's working dir
+	dp                 dirPickState
+	pendingName        string // session name saved during dir picking
+	pendingSkipPerms   bool   // --dangerously-skip-permissions flag carried from new-session dialog
+	dirChangeForWindow string // when set, dir picker is changing an existing session's working dir
 
 	// new session options
 	skipPermissions bool
@@ -255,8 +255,8 @@ type DialogModel struct {
 	newSessionField int             // 0=name, 1=scrollback, 2=permissions
 
 	// settings dialog options
-	settingsField  int    // 0=scrollback, 1=permissions, 2=working dir
-	workingDir     string // displayed in settings field 2
+	settingsField int    // 0=scrollback, 1=permissions, 2=working dir
+	workingDir    string // displayed in settings field 2
 }
 
 func NewDialogModel(styles Styles) DialogModel {

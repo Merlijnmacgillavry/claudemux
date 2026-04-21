@@ -44,7 +44,7 @@ func (s *Store) SetWindow(windowName, displayName, cwd string) {
 	if displayName != "" {
 		meta.DisplayName = displayName
 	}
-	if cwd != "" {
+	if cwd != "" && cwd != "/" {
 		meta.WorkingDir = cwd
 	}
 	if meta.CreatedAt.IsZero() {
@@ -134,7 +134,7 @@ func (s *Store) GetRecentDirs() []string {
 // AddRecentDir prepends dir to the recent-directories list, deduplicates, and
 // caps it at 10 entries. No-op for empty strings.
 func (s *Store) AddRecentDir(dir string) {
-	if dir == "" {
+	if dir == "" || dir == "/" {
 		return
 	}
 	s.mu.Lock()
