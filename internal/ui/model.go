@@ -248,6 +248,29 @@ func pollCapture(client *tmuxpkg.Client, windowName string, height int, gen uint
 	}
 }
 
+// resizeThenCapture resizes the tmux window to (tw × th) and then captures paneH
+// lines, all in one sequential command. Sequencing is critical: if the capture
+// races ahead of the resize, GotoBottom clips the extra rows and the top of
+// Claude Code's output disappears until the next slow-path tick.
+func resizeThenCapture(client *tmuxpkg.Client, windowName string, tw, th, paneH int, gen uint64, sem chan struct{}) tea.Cmd {
+	return func() tea.Msg {
+		if tw > 0 && th > 0 {
+			select {
+			case sem <- struct{}{}:
+				_ = client.ResizeWindow(windowName, tw, th)
+				<-sem
+			default:
+				// Another resize is in flight; capture with whatever size the pane has.
+			}
+		}
+		content, err := client.CapturePane(windowName, paneH)
+		if err != nil {
+			return tmuxOutputMsg{windowName: windowName, content: "", isDead: true, generation: gen}
+		}
+		return tmuxOutputMsg{windowName: windowName, content: content, generation: gen}
+	}
+}
+
 // pollCaptureBg polls a background (non-active) window for its content only.
 // It never checks IsPaneDead — background polls exist solely to update the
 // waiting-for-input indicator in the sidebar.
@@ -1163,21 +1186,12 @@ func (m *RootModel) openWindow(windowName, displayName string, isRunning bool) t
 	ph := m.height - sh
 	tw := mw - 3
 	th := ph - 3
-	if tw > 0 && th > 0 {
-		select {
-		case m.resizeSem <- struct{}{}:
-			go func() {
-				defer func() { <-m.resizeSem }()
-				_ = m.tmux.ResizeWindow(windowName, tw, th)
-			}()
-		default:
-			// A resize is already in flight; skip this one.
-		}
-	}
 
 	meta, _ := m.store.GetWindow(windowName)
 	return tea.Batch(
-		pollCapture(m.tmux, windowName, paneH, m.tickGeneration),
+		// Resize then capture in one sequential command: if capture races ahead of
+		// resize, GotoBottom clips the extra rows and cuts the top of the output.
+		resizeThenCapture(m.tmux, windowName, tw, th, paneH, m.tickGeneration, m.resizeSem),
 		fetchGitBranch(windowName, meta.WorkingDir),
 		detectCmd,
 	)
