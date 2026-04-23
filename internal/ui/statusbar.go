@@ -78,6 +78,9 @@ func (s StatusBarModel) View() string {
 			padding := strings.Repeat(" ", s.width-contentWidth)
 			content = content + s.styles.StatusHints.Copy().UnsetPadding().Render(padding)
 		}
+		if s.width > 0 {
+			content = lipgloss.NewStyle().MaxWidth(s.width).Render(content)
+		}
 		return content
 	}
 
@@ -109,6 +112,13 @@ func (s StatusBarModel) View() string {
 	if contentWidth < s.width {
 		padding := strings.Repeat(" ", s.width-contentWidth)
 		content = content + s.styles.StatusHints.Copy().UnsetPadding().Render(padding)
+	}
+
+	// Clamp to terminal width. Without this, a long hints string causes the
+	// status bar to wrap onto a second row, making the total view height
+	// m.height+1 and pushing the top border off screen.
+	if s.width > 0 {
+		content = lipgloss.NewStyle().MaxWidth(s.width).Render(content)
 	}
 
 	return content
