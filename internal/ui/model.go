@@ -1328,7 +1328,10 @@ func (m *RootModel) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	}
 
 	// Left-button release: finalise selection or fall back to INSERT mode click.
-	if msg.Action == tea.MouseActionRelease && msg.Button == tea.MouseButtonLeft && m.mainPane.selection.Active {
+	// We intentionally omit the button check here: X10 mouse protocol (used by
+	// tmux in some configurations) reports MouseButtonNone on all releases, so
+	// requiring MouseButtonLeft would leave the selection permanently stuck.
+	if msg.Action == tea.MouseActionRelease && m.mainPane.selection.Active {
 		sel := m.mainPane.selection
 		isClick := sel.StartRow == sel.EndRow && sel.StartCol == sel.EndCol
 		if !isClick {
