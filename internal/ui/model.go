@@ -104,10 +104,6 @@ type tmuxOutputMsg struct {
 	generation uint64 // generation at issue time; 0 for background polls (no check)
 }
 
-type sessionIDDetectedMsg struct {
-	windowName string
-	sessionID  string
-}
 
 type tmuxTickMsg struct{ generation uint64 }
 type bgPollTickMsg struct{}
@@ -120,8 +116,6 @@ type gitBranchMsg struct {
 type windowCreatedMsg struct {
 	windowName  string
 	displayName string
-	cwd         string
-	startedAt   time.Time
 }
 
 type errorMsg struct {
@@ -316,23 +310,6 @@ func sendLineCmd(client *tmuxpkg.Client, windowName, line string) tea.Cmd {
 	}
 }
 
-// detectSessionID polls for a new Claude session file in the project directory.
-// It retries every 3 s for up to 30 s because Claude's startup (auth, API
-// handshake, first write) can easily exceed a single 4-second window.
-func detectSessionID(cwd, windowName string, after time.Time) tea.Cmd {
-	return func() tea.Msg {
-		const attempts = 10
-		const interval = 3 * time.Second
-		for i := 0; i < attempts; i++ {
-			time.Sleep(interval)
-			id, err := claudepkg.LatestSessionID(cwd, after)
-			if err == nil {
-				return sessionIDDetectedMsg{windowName: windowName, sessionID: id}
-			}
-		}
-		return noopMsg{}
-	}
-}
 
 func startTick(gen uint64, d time.Duration) tea.Cmd {
 	return tea.Tick(d, func(time.Time) tea.Msg {
@@ -374,7 +351,6 @@ func (m *RootModel) captureDepth() int {
 }
 
 func createWindow(client *tmuxpkg.Client, store *session.Store, claudeBinary, displayName, cwd string, skipPerms bool, scrollback int) tea.Cmd {
-	startedAt := time.Now()
 	command := claudeBinary
 	if skipPerms {
 		command = claudeBinary + " --dangerously-skip-permissions"
@@ -400,7 +376,7 @@ func createWindow(client *tmuxpkg.Client, store *session.Store, claudeBinary, di
 		}
 		cfg := store.GetConfig()
 		_ = cfg.Save()
-		return windowCreatedMsg{windowName: windowName, displayName: displayName, cwd: cwd, startedAt: startedAt}
+		return windowCreatedMsg{windowName: windowName, displayName: displayName}
 	}
 }
 
@@ -616,10 +592,6 @@ func (m *RootModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, pollCapture(m.tmux, m.activeWindowName, m.captureDepth(), m.tickGeneration)
 		}
 
-	case sessionIDDetectedMsg:
-		m.store.SetClaudeSessionID(msg.windowName, msg.sessionID)
-		m.saveConfig()
-
 	case hooks.HookNotificationMsg:
 		// Instant notification from a Claude Code hook: mark the window as
 		// waiting for input without waiting for the next background poll.
@@ -636,11 +608,7 @@ func (m *RootModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case windowCreatedMsg:
 		cmd := m.openWindow(msg.windowName, msg.displayName, true)
-		var detectCmd tea.Cmd
-		if msg.cwd != "" {
-			detectCmd = detectSessionID(msg.cwd, msg.windowName, msg.startedAt)
-		}
-		return m, tea.Batch(cmd, discoverWindows(m.tmux, m.store), detectCmd)
+		return m, tea.Batch(cmd, discoverWindows(m.tmux, m.store))
 
 	case tea.MouseMsg:
 		return m.handleMouse(msg)
@@ -1127,8 +1095,7 @@ func (m *RootModel) maybeRespawn(windowName, displayName string) tea.Cmd {
 }
 
 // openWindow switches the main pane to the given tmux window and starts polling.
-// If the pane is dead (isRunning=false), it is respawned with claude resume <id>
-// (or bare claude if no session ID is stored yet).
+// If the pane is dead (isRunning=false), it is respawned with a fresh claude process.
 func (m *RootModel) openWindow(windowName, displayName string, isRunning bool) tea.Cmd {
 	m.activeWindowName = windowName
 	m.lastCaptureHash = 0
@@ -1146,17 +1113,12 @@ func (m *RootModel) openWindow(windowName, displayName string, isRunning bool) t
 		delete(m.lastRespawnTime, windowName)
 	}
 
-	var detectCmd tea.Cmd
 	if !isRunning {
 		meta, _ := m.store.GetWindow(windowName)
 		claudeCmd := m.claudeBinary
 		if meta.SkipPermissions {
 			claudeCmd += " --dangerously-skip-permissions"
 		}
-		if meta.ClaudeSessionID != "" {
-			claudeCmd += " resume " + meta.ClaudeSessionID
-		}
-		startedAt := time.Now()
 		if err := m.tmux.RespawnPane(windowName, claudeCmd, meta.WorkingDir); err != nil {
 			// Window doesn't exist (e.g. after a system restart or manual stop).
 			// Create it fresh with the same name so the config key remains stable.
@@ -1168,11 +1130,6 @@ func (m *RootModel) openWindow(windowName, displayName string, isRunning bool) t
 		// Enter press (before discoverWindows refreshes the list) does not
 		// trigger another respawn.
 		m.sidebar.SetRunning(windowName, true)
-		// If no session ID was stored this is a brand-new Claude session; detect
-		// and persist the ID so future restarts can resume it.
-		if meta.ClaudeSessionID == "" && meta.WorkingDir != "" {
-			detectCmd = detectSessionID(meta.WorkingDir, windowName, startedAt)
-		}
 	}
 
 	// Increment the generation to invalidate any tick messages still in flight
@@ -1193,7 +1150,6 @@ func (m *RootModel) openWindow(windowName, displayName string, isRunning bool) t
 		// resize, GotoBottom clips the extra rows and cuts the top of the output.
 		resizeThenCapture(m.tmux, windowName, tw, th, paneH, m.tickGeneration, m.resizeSem),
 		fetchGitBranch(windowName, meta.WorkingDir),
-		detectCmd,
 	)
 }
 
@@ -1397,15 +1353,26 @@ func (m *RootModel) View() string {
 		mainBorder = m.styles.ActiveBorder
 	}
 
-	sidebarView := sidebarBorder.
+	// Pre-render each panel's content to exact dimensions before applying the
+	// border. The Render pipeline applies word-wrap (Width) before Height
+	// padding, but Height only pads — it never truncates. Any word-wrap
+	// overflow would make the bordered view taller than paneHeight. By
+	// separating the sizing step (with MaxHeight to clamp) from the border
+	// step (which avoids re-wrapping), both panels are guaranteed to be
+	// exactly paneHeight rows tall.
+	sidebarBody := lipgloss.NewStyle().
 		Width(sidebarWidth - 2).
 		Height(paneHeight - 2).
+		MaxHeight(paneHeight - 2).
 		Render(m.sidebar.View())
+	sidebarView := sidebarBorder.Render(sidebarBody)
 
-	mainView := mainBorder.
+	mainBody := lipgloss.NewStyle().
 		Width(mainWidth - 2).
 		Height(paneHeight - 2).
+		MaxHeight(paneHeight - 2).
 		Render(m.mainPane.View())
+	mainView := mainBorder.Render(mainBody)
 
 	panes := lipgloss.JoinHorizontal(lipgloss.Top, sidebarView, mainView)
 	statusBar := m.statusBar.View()

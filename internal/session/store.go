@@ -61,15 +61,6 @@ func (s *Store) GetWindow(windowName string) (config.WindowMeta, bool) {
 	return meta, ok
 }
 
-// SetClaudeSessionID updates the Claude session ID for an existing window.
-func (s *Store) SetClaudeSessionID(windowName, sessionID string) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	meta := s.cfg.Windows[windowName]
-	meta.ClaudeSessionID = sessionID
-	s.cfg.Windows[windowName] = meta
-}
-
 // RemoveWindow deletes a window's metadata from the store.
 func (s *Store) RemoveWindow(windowName string) {
 	s.mu.Lock()
